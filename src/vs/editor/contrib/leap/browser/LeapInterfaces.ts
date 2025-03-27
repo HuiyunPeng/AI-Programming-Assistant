@@ -5,22 +5,22 @@ import { ALogger, StudyGroup } from "../../rtv/browser/RTVInterfaces";
 // Our internal type for OpenAI requests, used for both
 // remote and local versions.
 export interface OpenAIRequest {
-	'model': string;
-	'messages'?: OpenAIMessage[];
-	'prompt': string | null;
-	'suffix'?: string | null;
-	'max_tokens'?: number | null;
-	'temperature'?: number | null;
-	'top_p'?: number | null;
-	'n'?: number | null;
-	'stream': true;
-	'logprobs'?: number | null;
-	'echo'?: boolean | null;
-	'stop'?: string | string[];
-	'presence_penalty'?: number | null;
-	'frequency_penalty'?: number | null;
-	'best_of'?: number | null;
-	'user'?: string;
+	model: string;
+	messages?: OpenAIMessage[];
+	prompt: string | null;
+	suffix?: string;
+	max_tokens?: number;
+	temperature?: number;
+	top_p?: number;
+	n?: number;
+	stream: true;
+	logprobs?: number;
+	echo?: boolean;
+	stop?: string | string[];
+	presence_penalty?: number;
+	frequency_penalty?: number;
+	best_of?: number;
+	user?: string;
 }
 
 export interface OpenAIMessage {
@@ -84,6 +84,16 @@ export abstract class ALeapUtils implements ILeapUtils {
 
 	cleanUpCompletions(request: OpenAIRequest, codes: string[]): string[] {
 		const prompt = request.prompt;
+		for (const i in codes) {
+			let completion = codes[i];
+			// remove backticks and language part if it exists
+			// (assuming language part and actual code is separated by newline)
+			completion = completion.trim();
+			if (completion.startsWith("```") && completion.endsWith("```")) {
+				completion = completion.substring(completion.indexOf("\n"), completion.length - 3);
+			}
+			codes[i] = completion;
+		}
 		if (prompt !== null && prompt.length > 1) {
 			// The new `instruct` model *tends* to start with '\n' + indentation
 			// so we manually remove that here if it matches the end of the prompt

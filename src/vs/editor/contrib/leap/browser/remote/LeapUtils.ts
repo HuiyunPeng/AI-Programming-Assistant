@@ -5,7 +5,8 @@ import { LogEventData, LogResultData } from 'vs/editor/contrib/rtv/browser/RTVIn
 class RemoteUtils extends ALeapUtils {
 	public readonly EOL: string = '\n';
 	private _requestTemplate: OpenAIRequest = {
-		model: "gpt-3.5-turbo-instruct",
+		model: "gpt-4o-mini",
+		// model: "gpt-3.5-turbo-instruct",
 		// model: "llama3.1:latest",
 		temperature: 0.5,
 		n: 5,

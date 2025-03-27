@@ -11,7 +11,8 @@ class LocalUtils extends ALeapUtils {
 	public readonly EOL: string = os.EOL;
 	private _openAi: OpenAI;
 	private _requestTemplate: OpenAIRequest = {
-		model: "gpt-3.5-turbo-instruct",
+		model: "gpt-4o-mini",
+		// model: "gpt-3.5-turbo-instruct",
 		// model: "llama3.1:latest",
 		temperature: 0.5,
 		n: 5,
@@ -37,10 +38,18 @@ class LocalUtils extends ALeapUtils {
 	}
 
 	async getCompletions(request: OpenAIRequest, signal: AbortSignal, progressCallback: (e: any) => void): Promise<string[]> {
+		console.log("OUR REQUEST LOOKS LIKE:", request);
 		const completions = await this._openAi.chat.completions.create({
 			model: request.model,
 			messages: [
-				{ role: "user", content: request.prompt ?? "" },
+				{
+					role: "system",
+					content: "You are a code completion model who's purpose to complete the user's code as best as possible. Only output the code that would complete this."
+				},
+				{
+					role: "user",
+					content: request.prompt ?? ""
+				}
 			],
 			temperature: request.temperature,
 			n: request.n,
@@ -48,6 +57,8 @@ class LocalUtils extends ALeapUtils {
 			max_tokens: request.max_tokens,
 			stream: request.stream,
 		});
+
+
 		signal.onabort = ((_) => { completions.controller.abort(); });
 
 		const codes = Array.from({ length: (request.n || 1) }, () => "");
@@ -58,7 +69,33 @@ class LocalUtils extends ALeapUtils {
 			progressCallback(part);
 		}
 
+		console.log("OUTPUT:", codes);
+
 		return this.cleanUpCompletions(request, codes);
+	}
+
+	async getExplanations(request: OpenAIRequest, signal: AbortSignal, progressCallback: (e: any) => void): Promise<string[]> {
+		console.log("OUR REQUEST LOOKS LIKE:", request);
+		// TODO add explanations for code?
+		// const completions = await this._openAi.chat.completions.create({
+		// 	model: request.model,
+		// 	messages: [
+		// 		{
+		// 			role: "system",
+		// 			content: "You are a helpful coding assistant who helps explain what code does.."
+		// 		},
+		// 		{
+		// 			role: "user",
+		// 			content: request.prompt ?? ""
+		// 		}
+		// 	],
+		// 	temperature: request.temperature,
+		// 	n: request.n,
+		// 	stop: request.stop,
+		// 	max_tokens: request.max_tokens,
+		// 	stream: request.stream,
+		// });
+		return [];
 	}
 
 	getLogger(editor: ICodeEditor): ILeapLogger {

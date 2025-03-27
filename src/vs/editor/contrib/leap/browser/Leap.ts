@@ -236,7 +236,7 @@ class Leap implements IEditorContribution {
 		this._logger.panelUnfocus();
 
 		if (this._panel) {
-			this._panel.style.right = '-300px';
+			this._panel.style.right = '-400px';
 			this._panel.style.opacity = '0.3';
 		}
 	}
@@ -292,6 +292,8 @@ class Leap implements IEditorContribution {
 		}
 
 		// Create the HTML for the webview
+		// interestingly, we first create content first, then create panel (which would've been created already in getCompletions)
+		// then we add content to panel
 		const html = this.renderPanelContent(this._lastCompletions);
 		const panel = this.createPanel();
 		panel.appendChild(html);
@@ -301,6 +303,7 @@ class Leap implements IEditorContribution {
 	}
 
 	public hideCompletions(commentOnly: boolean = true): void {
+		// TODO do we really want to delete everything when we hide completions?
 		// first, hide the exploration panel
 		this.dispose();
 
@@ -311,6 +314,8 @@ class Leap implements IEditorContribution {
 
 	/**
 	 * Makes the Codex API to get completions for the given text.
+	 * Also creates the initial panel (using method createPanel)
+	 *
 	 * @param textInBuffer The text up to the current cursor position.
 	 */
 	public async getCompletions(prefix: string, suffix: string, signal: AbortSignal): Promise<Completion[]> {
@@ -335,6 +340,7 @@ class Leap implements IEditorContribution {
 			progressBar.done();
 
 			// TODO (lisa) bad hack below, should remove when the server logic is set up for the web version
+			// NOTE that prefix and suffix isn't actually used
 			const modelRequest = await this._utils.buildRequest(prefix, suffix);
 			this._logger.modelRequest(modelRequest);
 			const codes: string[] = await this._utils.getCompletions(
@@ -398,6 +404,12 @@ class Leap implements IEditorContribution {
 		return rs;
 	}
 
+	/**
+	 * Renders all the completions in panel
+	 *
+	 * @param completions
+	 * @returns
+	 */
 	public renderPanelContent(completions: Completion[]): HTMLElement {
 		const div = document.createElement('div');
 		div.style.overflowY = 'scroll';
@@ -478,6 +490,13 @@ class Leap implements IEditorContribution {
 		return block;
 	}
 
+	/**
+	 * Renders one instance of completion, as well as the various controls that can be done with it
+	 *
+	 * @param id
+	 * @param code
+	 * @returns
+	 */
 	private renderPython(id: number, code: PythonCode): HTMLElement {
 		const block = document.createElement('div');
 		block.style.marginBottom = '20px';
@@ -488,15 +507,35 @@ class Leap implements IEditorContribution {
 		block.appendChild(title);
 
 		// Then the links we use to communicate!
-		// TODO (kas) Add a "revert" link here!
-		const link = document.createElement('a');
-		block.appendChild(link);
-
-		setInner(link, 'Preview');
-		link.onclick = (_) => {
-			console.log('link clicked');
+		// TODO could wrap links in div, good ol web dev standards
+		// might need it anyways, to link up with the actual completion div later created?
+		const previewLink = document.createElement('a');
+		block.appendChild(previewLink);
+		setInner(previewLink, 'Preview');
+		previewLink.onclick = (_) => {
 			this.previewCompletion(id);
 			this.compressPanel();
+		};
+
+		// TODO Add a "revert" link for convenience
+		const revertLink = document.createElement('a');
+		block.appendChild(revertLink);
+		setInner(revertLink, 'Revert');
+		revertLink.style.marginLeft = "10px";
+		revertLink.onclick = (_) => {
+			console.log('link clicked');
+			// this.removeCompletion();
+			// this.compressPanel();
+		};
+
+		// TODO add explanations here
+		const explainLink = document.createElement('a');
+		block.appendChild(explainLink);
+		setInner(explainLink, 'Explain');
+		explainLink.style.marginLeft = "10px";
+		explainLink.onclick = (_) => {
+			// this.removeCompletion();
+			// this.compressPanel();
 		};
 
 		let completion = code.code;
@@ -518,6 +557,7 @@ class Leap implements IEditorContribution {
 		codeWrapper.style.borderWidth = '1px';
 		codeWrapper.style.borderColor = theme.getColor(editorForeground)?.toString() ?? '';
 		codeWrapper.style.backgroundColor = theme.getColor(editorBackground)?.toString() ?? '';
+		codeWrapper.style.marginTop = "5px";
 		codeWrapper.appendChild(this._mdRenderer.render(md).element);
 
 		block.appendChild(codeWrapper);
