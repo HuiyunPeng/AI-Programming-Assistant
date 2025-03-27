@@ -208,7 +208,7 @@ class Leap implements IEditorContribution {
 			this._panel.style.width = '500px';
 			this._panel.style.padding = '10px';
 			this._panel.style.transitionProperty = 'all';
-			this._panel.style.transitionDuration = '0.3s';
+			this._panel.style.transitionDuration = '0.2s';
 			this._panel.style.transitionDelay = '0s';
 			this._panel.style.transitionTimingFunction = 'ease-in';
 			this._panel.onmouseenter = (e) => {
@@ -425,13 +425,13 @@ class Leap implements IEditorContribution {
 			div.appendChild(this.renderCompletion(i, completions[i]));
 		}
 
-		const script = document.createElement('script');
-		setInner(script, `
-			function previewCompletion(id) {
-				const event = new CustomEvent('leap', { completion: id });
-				dispatchEvent(event);
-			}`);
-		div.appendChild(script);
+		// const script = document.createElement('script');
+		// setInner(script, `
+		// 	function previewCompletion(id) {
+		// 		const event = new CustomEvent('leap', { completion: id });
+		// 		dispatchEvent(event);
+		// 	}`);
+		// div.appendChild(script);
 
 		return div;
 	}
@@ -523,8 +523,7 @@ class Leap implements IEditorContribution {
 		setInner(revertLink, 'Revert');
 		revertLink.style.marginLeft = "10px";
 		revertLink.onclick = (_) => {
-			console.log('link clicked');
-			// this.removeCompletion();
+			this.removeCompletion(false);
 			// this.compressPanel();
 		};
 
@@ -566,7 +565,7 @@ class Leap implements IEditorContribution {
 	}
 
 	// (lisa) why is it async?
-	private async previewCompletion(index: number): Promise<void> {
+	private previewCompletion(index: number) {
 		// TODO (kas) error handling.
 		if (!this._lastCompletions ||
 			this._lastCompletions.length <= index) {

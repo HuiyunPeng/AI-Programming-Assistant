@@ -27,19 +27,19 @@ def add_red_format(html):
 
 
 def is_loop_str(str):
-	return re.search("(for|while).*:\w*\n", str) != None
+	return re.search(r"(for|while).*:\w*\n", str) != None
 
 
 def is_break_str(str):
-	return re.search("break", str.strip()) != None
+	return re.search(r"break", str.strip()) != None
 
 
 def is_return_str(str):
-	return re.search("return", str.strip()) != None
+	return re.search(r"return", str.strip()) != None
 
 
 def is_clf_str(str):
-	return re.search("\.clf\(\w*\)", str) != None
+	return re.search(r"\.clf\(\w*\)", str) != None
 
 
 def indent(str):
