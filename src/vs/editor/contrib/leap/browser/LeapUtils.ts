@@ -39,12 +39,13 @@ class LocalUtils extends ALeapUtils {
 
 	async getCompletions(request: OpenAIRequest, signal: AbortSignal, progressCallback: (e: any) => void): Promise<string[]> {
 		console.log("OUR REQUEST LOOKS LIKE:", request);
+		// TODO maybe change this to only include comments when user requests them
 		const completions = await this._openAi.chat.completions.create({
 			model: request.model,
 			messages: [
 				{
 					role: "system",
-					content: "You are an expert Python programmer. You complete the user's code as best as possible. Only output the code that would complete this."
+					content: "You are an expert Python programmer. You complete the user's code as best as possible. Only output the code that would complete this. You may add comments explaining it if it seems appropriate."
 				},
 				{
 					role: "user",
@@ -73,7 +74,7 @@ class LocalUtils extends ALeapUtils {
 	}
 
 	// TODO add granuarlity for different levels of explanations
-	// for now, we do line-by-line
+	// for now, we do high level
 	async getExplanationsForCode(code: string, origPrompt: string, signal: AbortSignal, progressCallback: (e: any) => void): Promise<string> {
 		const completion = await this._openAi.chat.completions.create({
 			model: this._requestTemplate.model,

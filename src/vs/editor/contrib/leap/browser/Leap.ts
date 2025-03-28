@@ -67,8 +67,12 @@ class Leap implements IEditorContribution {
 	private _themeService: IThemeService;
 	private _panel: HTMLElement | undefined;
 	private _mdRenderer: MarkdownRenderer;
+
 	private _lastCompletions: Completion[] | undefined; // TODO (kas) This is a bad idea... we need to carefully think about how to handle state.
+	// private _lastExplanations: string[] | undefined;
+	// private _lastTestcases: string[] | undefined;
 	private _lastPrompt: string | undefined;
+
 	private _lastCursorPos: IPosition | undefined;
 	private _state: LeapState = LeapState.Off;
 	private _utils: ILeapUtils = getUtils();
@@ -217,7 +221,11 @@ class Leap implements IEditorContribution {
 			this._panel.style.transitionDelay = '0s';
 			this._panel.style.transitionTimingFunction = 'ease';
 			this._panel.style.overflowX = 'visible';
-			this._panel.style.overflowY = 'clip';
+			// this._panel.style.overflowY = 'clip';
+			this._panel.style.overflowY = 'auto';
+			this._panel.onwheel = (e) => {
+				e.stopImmediatePropagation();
+			};
 			this._panel.onmouseenter = (e) => {
 				this.expandPanel();
 			};
@@ -258,7 +266,6 @@ class Leap implements IEditorContribution {
 
 		// NOTE: Technically this is never needed since we create panel only when toggling
 		// when we toggle off, interestingly we delete the panel
-
 		// Clear the panel content
 		this.clearPanel();
 
@@ -375,7 +382,7 @@ class Leap implements IEditorContribution {
 			this._panel.appendChild(container);
 
 			// TODO (lisa) bad hack to get around the references to completions
-			progressBar.done();
+			// progressBar.done();
 
 			// request the completions
 			this._lastPrompt = prefix;
@@ -455,6 +462,12 @@ class Leap implements IEditorContribution {
 		}
 	}
 
+	/**
+	 * Displays a suggestion page, which the full code completion and other actions for this particular completion
+	 *
+	 * @param index The index of the completions array to display this suggestion for
+	 * @returns
+	 */
 	private async displaySuggestion(index: number) {
 		if (!this._panel) {
 			console.error('displaySuggestion called with no panel! Index: ', index);
@@ -482,7 +495,13 @@ class Leap implements IEditorContribution {
 		this.renderPython(index, completion);
 	}
 
-
+	/**
+	 * Renders an error message page
+	 *
+	 * @param index
+	 * @param error
+	 * @returns
+	 */
 	private renderError(index: number, error: ErrorMessage) {
 		if (!this._panel) {
 			console.error('renderError called with no panel! Index: ', index);
@@ -512,6 +531,13 @@ class Leap implements IEditorContribution {
 		this._panel.appendChild(block);
 	}
 
+	/**
+	 * Renders a code completion page, with available actions for this particular completion
+	 *
+	 * @param index
+	 * @param code
+	 * @returns
+	 */
 	private renderPython(index: number, code: PythonCode) {
 		if (!this._panel) {
 			console.error('renderPython called with no panel! Index: ', index);
@@ -530,32 +556,27 @@ class Leap implements IEditorContribution {
 		// TODO could wrap links in div, good ol web dev standards
 		// might need it anyways, to link up with the actual completion div later created?
 		const previewLink = document.createElement('a');
-		block.appendChild(previewLink);
-		setInner(previewLink, 'Preview');
+		previewLink.textContent = "Copy to Editor";
+		previewLink.className = "monaco-button monaco-text-button";
+		previewLink.style.color = "white";
+		previewLink.style.display = "inline-block";
+		previewLink.style.width = "100px";
+		previewLink.style.backgroundColor = "rgb(14, 99, 156)";
 		previewLink.onclick = (_) => {
 			this.previewCompletion(index);
 			this.compressPanel();
 		};
+		block.appendChild(previewLink);
 
 		const revertLink = document.createElement('a');
-		block.appendChild(revertLink);
-		setInner(revertLink, 'Revert');
-		revertLink.style.marginLeft = "10px";
+		revertLink.textContent = "Revert";
+		revertLink.className = "monaco-button monaco-text-button";
+		revertLink.style.marginLeft = "12px";
+		revertLink.style.display = "inline";
 		revertLink.onclick = (_) => {
 			this.removeCompletion(false);
-			// this.compressPanel();
 		};
-
-		// TODO add explanations here
-		const explainLink = document.createElement('a');
-		block.appendChild(explainLink);
-		setInner(explainLink, 'Explain');
-		explainLink.style.marginLeft = "10px";
-		explainLink.onclick = (_) => {
-			this.explainCompletion(index);
-			// this.removeCompletion();
-			// this.compressPanel();
-		};
+		block.appendChild(revertLink);
 
 		let completion = code.code;
 
@@ -564,9 +585,9 @@ class Leap implements IEditorContribution {
 			completion = ' '.repeat(this._lastCursorPos.column - 1) + completion;
 		}
 
-		// finally, add the code block itself
+		// add the code block itself
 		const md = new MarkdownString();
-		md.appendCodeblock('python', completion);
+		md.appendCodeblock("python", completion);
 
 		// Style it!
 		const theme = this._themeService.getColorTheme();
@@ -577,9 +598,50 @@ class Leap implements IEditorContribution {
 		codeWrapper.style.borderColor = theme.getColor(editorForeground)?.toString() ?? '';
 		codeWrapper.style.backgroundColor = theme.getColor(editorBackground)?.toString() ?? '';
 		codeWrapper.style.marginTop = "5px";
+		codeWrapper.style.marginBottom = "10px";
 		codeWrapper.appendChild(this._mdRenderer.render(md).element);
-
 		block.appendChild(codeWrapper);
+
+		const actionButtonsDiv = document.createElement("div");
+		actionButtonsDiv.style.display = "flex";
+		actionButtonsDiv.style.flexDirection = "row";
+		actionButtonsDiv.style.alignItems = "center";
+		actionButtonsDiv.style.gap = "12px";
+		block.appendChild(actionButtonsDiv);
+
+		const explanationDiv = document.createElement("div");
+		explanationDiv.style.marginTop = "10px";
+		block.appendChild(explanationDiv);
+
+		const testcasesDiv = document.createElement("div");
+		testcasesDiv.style.marginTop = "10px";
+		testcasesDiv.style.marginBottom = "30px";
+		block.appendChild(testcasesDiv);
+
+		const explainLink = document.createElement('a');
+		explainLink.textContent = "Explain";
+		explainLink.className = "monaco-button monaco-text-button";
+		explainLink.style.color = "white";
+		explainLink.style.display = "block";
+		explainLink.style.width = "60px";
+		explainLink.style.backgroundColor = "rgb(14, 99, 156)";
+		explainLink.onclick = (_) => {
+			this.explainCompletion(index, explanationDiv);
+		};
+		actionButtonsDiv.appendChild(explainLink);
+
+		const exampleTestsLink = document.createElement('a');
+		exampleTestsLink.textContent = "Example Tests";
+		exampleTestsLink.className = "monaco-button monaco-text-button";
+		exampleTestsLink.style.color = "white";
+		exampleTestsLink.style.display = "block";
+		exampleTestsLink.style.width = "100px";
+		exampleTestsLink.style.backgroundColor = "rgb(14, 99, 156)";
+		exampleTestsLink.onclick = (_) => {
+			// this.explainCompletion(index);
+			// TODO testcases
+		};
+		actionButtonsDiv.appendChild(exampleTestsLink);
 
 		this._panel.appendChild(block);
 	}
@@ -598,7 +660,7 @@ class Leap implements IEditorContribution {
 		div.style.display = "flex";
 		div.style.flexDirection = "center";
 		div.style.alignItems = "center";
-		div.style.gap = "5px";
+		div.style.gap = "6px";
 
 		const prevLink = document.createElement("a");
 		prevLink.textContent = "< Prev";
@@ -637,26 +699,8 @@ class Leap implements IEditorContribution {
 		this.removeCompletion(commentOnly);
 	}
 
-	public updateSuggestionDecor() {
-		switch (this._suggestionDecor) {
-			case 'bgcolor':
-				this._suggestionDecor = 'opacity';
-				break;
-			case 'opacity':
-				this._suggestionDecor = 'bgcolor';
-				break;
-			default:
-				throw new Error('Invalid suggestion decoration type');
-		}
-
-		// if there are already decorated code suggestions, update existing suggestions
-		if (this._decorationList.length > 0) {
-			this.decorateSuggestion();
-		}
-	}
-
-
-	private async explainCompletion(index: number) {
+	// TODO don't pass in explanation div, not very scalable i think
+	private async explainCompletion(index: number, explanationDiv: HTMLElement) {
 		if (!this._lastCompletions ||
 			this._lastCompletions.length <= index) {
 			console.error('explainCompletion called with invalid index. Ignoring: ', index);
@@ -669,9 +713,42 @@ class Leap implements IEditorContribution {
 			return;
 		}
 
+		const container = document.createElement('div');
+		const loadingTitle = document.createElement('h3');
+		loadingTitle.innerText = 'Getting explanations. Please wait...';
+		const barContainer = document.createElement('div');
+		const progressBar = new ProgressBar(barContainer).total(10);
+		const barElement = progressBar.getContainer();
+		barElement.style.position = 'inherit';
+		(barElement.firstElementChild! as HTMLElement).style.position = 'inherit';
+		container.appendChild(loadingTitle);
+		container.appendChild(barContainer);
+		explanationDiv.appendChild(container);
+
 		const codeText = completion.code;
-		const explanation = await this._utils.getExplanationsForCode(codeText, this._lastPrompt ?? "", this._abort.signal, () => { });
+		const explanation = await this._utils.getExplanationsForCode(
+			codeText,
+			this._lastPrompt ?? "",
+			this._abort.signal,
+			(_e) => progressBar.worked(1)
+		);
+		// TODO cache explanation,
+
+		progressBar.dispose();
+		container.remove();
+
 		console.log("got", explanation);
+		const block = document.createElement('div');
+
+		const title = document.createElement('h3');
+		title.textContent = "High Level Explanation";
+		block.appendChild(title);
+
+		const md = new MarkdownString();
+		md.appendMarkdown(explanation);
+		block.append(this._mdRenderer.render(md).element);
+
+		explanationDiv.appendChild(block);
 	}
 
 	private previewCompletion(index: number) {
@@ -817,6 +894,25 @@ class Leap implements IEditorContribution {
 			this._editor.executeEdits(
 				Leap.ID,
 				[{ range: editRange, text: text }]);
+		}
+	}
+
+
+	public updateSuggestionDecor() {
+		switch (this._suggestionDecor) {
+			case 'bgcolor':
+				this._suggestionDecor = 'opacity';
+				break;
+			case 'opacity':
+				this._suggestionDecor = 'bgcolor';
+				break;
+			default:
+				throw new Error('Invalid suggestion decoration type');
+		}
+
+		// if there are already decorated code suggestions, update existing suggestions
+		if (this._decorationList.length > 0) {
+			this.decorateSuggestion();
 		}
 	}
 
