@@ -33,6 +33,7 @@ export { StudyGroup } from "../../rtv/browser/RTVInterfaces";
 export interface ILeapUtils {
 	readonly EOL: string;
 	getCompletions(request: OpenAIRequest, signal: AbortSignal, progressCallback: (e: any) => void): Promise<string[]>;
+	getExplanationsForCode(code: string, origPrompt: string, signal: AbortSignal, progressCallback: (e: any) => void): Promise<string>;
 	buildRequest(prefix: string, suffix: string): Promise<OpenAIRequest>;
 	getConfig(): Promise<LeapConfig>;
 	getLogger(editor: ICodeEditor): ILeapLogger;
@@ -41,6 +42,7 @@ export interface ILeapUtils {
 export abstract class ALeapUtils implements ILeapUtils {
 	abstract EOL: string;
 	abstract getCompletions(request: OpenAIRequest, signal: AbortSignal, progressCallback: (e: any) => void): Promise<string[]>;
+	abstract getExplanationsForCode(code: string, origPrompt: string, signal: AbortSignal, progressCallback: (e: any) => void): Promise<string>;
 	abstract buildRequest(prefix: string, suffix: string): Promise<OpenAIRequest>;
 	abstract getConfig(): Promise<LeapConfig>;
 	abstract getLogger(editor: ICodeEditor): ILeapLogger;
@@ -84,16 +86,17 @@ export abstract class ALeapUtils implements ILeapUtils {
 
 	cleanUpCompletions(request: OpenAIRequest, codes: string[]): string[] {
 		const prompt = request.prompt;
+		// remove backticks and language part if it exists
+		// (assuming language part and actual code is separated by newline)
 		for (const i in codes) {
 			let completion = codes[i];
-			// remove backticks and language part if it exists
-			// (assuming language part and actual code is separated by newline)
 			completion = completion.trim();
 			if (completion.startsWith("```") && completion.endsWith("```")) {
 				completion = completion.substring(completion.indexOf("\n"), completion.length - 3);
 			}
 			codes[i] = completion;
 		}
+
 		if (prompt !== null && prompt.length > 1) {
 			// The new `instruct` model *tends* to start with '\n' + indentation
 			// so we manually remove that here if it matches the end of the prompt
@@ -145,7 +148,18 @@ export abstract class ALeapUtils implements ILeapUtils {
 			}
 		}
 
-		return codes;
+		// Remove empty or repeated completions.
+		const set = new Set();
+		const rs: string[] = [];
+		for (const code of codes) {
+			if (code === '' || set.has(code)) {
+				continue;
+			}
+			set.add(code);
+			rs.push(code);
+		}
+
+		return rs;
 	}
 }
 

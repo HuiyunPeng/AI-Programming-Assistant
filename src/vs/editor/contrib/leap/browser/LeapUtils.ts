@@ -16,7 +16,7 @@ class LocalUtils extends ALeapUtils {
 		// model: "llama3.1:latest",
 		temperature: 0.5,
 		n: 5,
-		max_tokens: 512,
+		max_tokens: 1024,
 		stop: [this.EOL + this.EOL],
 		stream: true,
 		prompt: null,
@@ -44,7 +44,7 @@ class LocalUtils extends ALeapUtils {
 			messages: [
 				{
 					role: "system",
-					content: "You are a code completion model who's purpose to complete the user's code as best as possible. Only output the code that would complete this."
+					content: "You are an expert Python programmer. You complete the user's code as best as possible. Only output the code that would complete this."
 				},
 				{
 					role: "user",
@@ -69,33 +69,48 @@ class LocalUtils extends ALeapUtils {
 			progressCallback(part);
 		}
 
-		console.log("OUTPUT:", codes);
-
 		return this.cleanUpCompletions(request, codes);
 	}
 
-	async getExplanations(request: OpenAIRequest, signal: AbortSignal, progressCallback: (e: any) => void): Promise<string[]> {
-		console.log("OUR REQUEST LOOKS LIKE:", request);
-		// TODO add explanations for code?
-		// const completions = await this._openAi.chat.completions.create({
-		// 	model: request.model,
-		// 	messages: [
-		// 		{
-		// 			role: "system",
-		// 			content: "You are a helpful coding assistant who helps explain what code does.."
-		// 		},
-		// 		{
-		// 			role: "user",
-		// 			content: request.prompt ?? ""
-		// 		}
-		// 	],
-		// 	temperature: request.temperature,
-		// 	n: request.n,
-		// 	stop: request.stop,
-		// 	max_tokens: request.max_tokens,
-		// 	stream: request.stream,
-		// });
-		return [];
+	// TODO add granuarlity for different levels of explanations
+	// for now, we do line-by-line
+	async getExplanationsForCode(code: string, origPrompt: string, signal: AbortSignal, progressCallback: (e: any) => void): Promise<string> {
+		const completion = await this._openAi.chat.completions.create({
+			model: this._requestTemplate.model,
+			messages: [
+				{
+					role: "system",
+					content: "You are an expert Python programmer. You assist the user by completing code and explaining it when necessary. When explaining, only provide the level of detail that the user requests for. Do not say anything unnecessary."
+				},
+				{
+					role: "user",
+					content: origPrompt ?? ""
+				},
+				{
+					role: "assistant",
+					content: code
+				},
+				{
+					role: "user",
+					content: "Please provide a high-level explaination of what this code does."
+				}
+			],
+			max_tokens: this._requestTemplate.max_tokens,
+			stream: true,
+		});
+
+		signal.onabort = ((_) => { completion.controller.abort(); });
+
+		let response = "";
+		for await (const part of completion) {
+			const delta = part.choices[0].delta.content ?? '';
+			response += delta;
+			progressCallback(part);
+		}
+
+		// clean up completion if needed
+
+		return response;
 	}
 
 	getLogger(editor: ICodeEditor): ILeapLogger {

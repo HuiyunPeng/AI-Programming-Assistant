@@ -10,15 +10,18 @@ import { ServicesAccessor } from 'vs/platform/instantiation/common/instantiation
 import { KeybindingWeight } from 'vs/platform/keybinding/common/keybindingsRegistry';
 import { IOpenerService } from 'vs/platform/opener/common/opener';
 import { Range } from 'vs/editor/common/core/range';
-import { MarkdownString } from 'vs/base/common/htmlContent';
+// import { MarkdownString } from 'vs/base/common/htmlContent';
 import { IThemeService } from 'vs/platform/theme/common/themeService';
-import { editorBackground, editorErrorBackground, editorErrorForeground, editorForeground, editorErrorBorder } from 'vs/platform/theme/common/colorRegistry';
-import { ProgressBar } from 'vs/base/browser/ui/progressbar/progressbar';
-import { LeapConfig, ILeapUtils, StudyGroup, PythonCode, ErrorMessage, Completion, LeapState, ILeapLogger } from 'vs/editor/contrib/leap/browser/LeapInterfaces';
+// import { editorBackground, editorErrorBackground, editorErrorForeground, editorForeground, editorErrorBorder } from 'vs/platform/theme/common/colorRegistry';
+// import { ProgressBar } from 'vs/base/browser/ui/progressbar/progressbar';
+import { LeapConfig, ILeapUtils, PythonCode, ErrorMessage, Completion, LeapState, ILeapLogger } from 'vs/editor/contrib/leap/browser/LeapInterfaces';
 import { getUtils } from 'vs/editor/contrib/leap/browser/LeapUtils';
 import { IRTVController, ViewMode } from '../../rtv/browser/RTVInterfaces';
 import { RTVController } from '../../rtv/browser/RTVDisplay';
 import { ITextModel } from 'vs/editor/common/model';
+import { ProgressBar } from 'vs/base/browser/ui/progressbar/progressbar';
+import { MarkdownString } from 'vs/base/common/htmlContent';
+import { editorBackground, editorErrorBackground, editorErrorBorder, editorErrorForeground, editorForeground } from 'vs/platform/theme/common/colorRegistry';
 
 const htmlPolicy = window.trustedTypes?.createPolicy('leap', { createHTML: (value) => value, createScript: (value) => value });
 
@@ -65,6 +68,7 @@ class Leap implements IEditorContribution {
 	private _panel: HTMLElement | undefined;
 	private _mdRenderer: MarkdownRenderer;
 	private _lastCompletions: Completion[] | undefined; // TODO (kas) This is a bad idea... we need to carefully think about how to handle state.
+	private _lastPrompt: string | undefined;
 	private _lastCursorPos: IPosition | undefined;
 	private _state: LeapState = LeapState.Off;
 	private _utils: ILeapUtils = getUtils();
@@ -105,23 +109,24 @@ class Leap implements IEditorContribution {
 				this._editor.setPosition(this._config.cursor);
 			}
 
-			// Register event handlers.
-			addEventListener('leap', (e: any) => {
-				const completionId = e.detail;
-				if (completionId === undefined) {
-					console.error('Completion ID was undefined:', completionId);
-					return;
-				}
-				this.previewCompletion(completionId);
-			});
+			// // Register event handlers.
+			// addEventListener('leap', (e: any) => {
+			// 	const completionId = e.detail;
+			// 	if (completionId === undefined) {
+			// 		console.error('Completion ID was undefined:', completionId);
+			// 		return;
+			// 	}
+			// 	this.previewCompletion(completionId);
+			// });
 
 			this._editor.onDidChangeModelContent((e) => { this.onDidChangeModelContent(e); });
 
 			// Disable projection boxes if necessary.
 			this._projectionBoxes.studyGroup = this._config.group;
-			if (this._config.group === StudyGroup.Control) {
-				this._projectionBoxes.changeViewMode(ViewMode.Stealth);
-			}
+			// NOTE disabling projection boxes for now
+			this._projectionBoxes.changeViewMode(ViewMode.Stealth);
+			// if (this._config.group === StudyGroup.Control) {
+			// }
 
 			// [lisa] Bad Hack: Disable the KeyDown handler on `Escape` in Projection Boxes
 			// For preventing the Projection Boxes to show Full View when the user presses `Escape`
@@ -164,7 +169,7 @@ class Leap implements IEditorContribution {
 			case LeapState.Loading:
 				// Just start!
 				this.state = LeapState.Loading;
-				await this.showCompletions(abort.signal);
+				await this.initPanel();
 				break;
 			case LeapState.Shown:
 				this.hideCompletions();
@@ -205,27 +210,57 @@ class Leap implements IEditorContribution {
 			this._panel.style.top = '30px';
 			this._panel.style.bottom = '14px';
 			this._panel.style.right = '14px';
-			this._panel.style.width = '500px';
+			this._panel.style.width = '600px';
 			this._panel.style.padding = '10px';
 			this._panel.style.transitionProperty = 'all';
 			this._panel.style.transitionDuration = '0.2s';
 			this._panel.style.transitionDelay = '0s';
-			this._panel.style.transitionTimingFunction = 'ease-in';
+			this._panel.style.transitionTimingFunction = 'ease';
+			this._panel.style.overflowX = 'visible';
+			this._panel.style.overflowY = 'clip';
 			this._panel.onmouseenter = (e) => {
 				this.expandPanel();
-				this._panel!.style.zIndex = '1000'; // place on top of everything inside the editor
 			};
 			this._panel.onmouseleave = (e) => {
 				if (e.offsetY < 0 || e.offsetX < 0) {
 					this.compressPanel();
 				}
-				this._panel!.style.zIndex = '0'; // place below Projection Boxes
 			};
+
+			// const compressButton = document.createElement("button");
+			// compressButton.className = 'monaco-button';
+			// compressButton.id = "compress-button";
+			// compressButton.style.position = "absolute";
+			// compressButton.style.top = "50%";
+			// compressButton.style.left = "0%";
+			// compressButton.style.transform = "translate(-100%, -50%)";
+			// // compressButton.style.width = "20px";
+			// compressButton.style.height = "50px";
+			// compressButton.style.border = "none";
+			// compressButton.style.borderTopLeftRadius = "10px";
+			// compressButton.style.borderBottomLeftRadius = "10px";
+			// compressButton.style.cursor = "pointer";
+			// compressButton.style.fontWeight = "bold";
+			// compressButton.textContent = ">";
+			// compressButton.onclick = (e) => {
+			// 	if (compressButton.textContent === ">") {
+			// 		this.compressPanel();
+			// 		compressButton.textContent = "<";
+			// 	} else {
+			// 		this.expandPanel();
+			// 		compressButton.textContent = ">";
+			// 	}
+			// };
+			// this._panel.appendChild(compressButton);
+
 			editor_div.appendChild(this._panel);
 		}
 
+		// NOTE: Technically this is never needed since we create panel only when toggling
+		// when we toggle off, interestingly we delete the panel
+
 		// Clear the panel content
-		this._panel.childNodes.forEach(n => n.remove());
+		this.clearPanel();
 
 		this._logger.panelOpen();
 
@@ -237,6 +272,7 @@ class Leap implements IEditorContribution {
 
 		if (this._panel) {
 			this._panel.style.right = '-400px';
+			this._panel!.style.zIndex = '0';
 			this._panel.style.opacity = '0.3';
 		}
 	}
@@ -246,84 +282,86 @@ class Leap implements IEditorContribution {
 
 		if (this._panel) {
 			this._panel.style.right = '14px';
+			this._panel!.style.zIndex = '1000';
 			this._panel.style.opacity = '1';
 		}
 	}
 
-	public async showCompletions(signal: AbortSignal): Promise<void> {
-		this._lastCompletions = this._config?.completions?.map(code => new PythonCode(code));
+	public async initPanel(): Promise<void> {
+		// first, create the panel
+		this.createPanel();
 
-		// Move the cursor if fixed
-		if (this._config?.cursor) {
-			const pos = this._config?.cursor;
-			this._editor.setPosition(pos);
-			this._lastCursorPos = pos;
-		}
-
-		if (!this._lastCompletions) {
-			// First, get the text from the editor
-			const model = this._editor.getModel();
-			if (!model) {
-				console.error(`Can't toggle Leap: model is ${model}`);
-				return;
-
-			}
-
-			// Get the cursor position
-			const pos = this._editor.getPosition();
-			if (pos === null) {
-				console.error(`Can't toggle Leap: cursor position is ${pos}`);
-				return;
-			}
-
-			this._lastCursorPos = pos;
-			const lastLineIdx = model.getLineCount() - 1;
-			const lastLineWidth = model.getLineMaxColumn(lastLineIdx);
-			const prefix: string = model.getValueInRange(new Range(0, 0, this._lastCursorPos.lineNumber, this._lastCursorPos.column));
-			const suffix: string = model.getValueInRange(new Range(this._lastCursorPos.lineNumber, this._lastCursorPos.column, lastLineIdx, lastLineWidth));
-
-			// then, get the completions
-			this._lastCompletions = await this.getCompletions(prefix, suffix, signal);
-		}
-
-		if (signal.aborted) {
-			console.debug('Leap operation was aborted. Not drawing the panel.');
+		// get text of editor to work with for ai stuff and create prompt
+		const editorText = this.getTextFromEditor();
+		if (!editorText) {
+			// show nothing
 			return;
 		}
+		const { prefix, suffix } = editorText;
 
-		// Create the HTML for the webview
-		// interestingly, we first create content first, then create panel (which would've been created already in getCompletions)
-		// then we add content to panel
-		const html = this.renderPanelContent(this._lastCompletions);
-		const panel = this.createPanel();
-		panel.appendChild(html);
+		// panel is clean
+		// fetch the completions
+		this._lastCompletions = await this.getCompletions(prefix, suffix);
+
+		// display completions
+		// show the first page of the completions
+		this.displaySuggestion(0);
 
 		// Finally, update the state.
 		this.state = LeapState.Shown;
 	}
 
-	public hideCompletions(commentOnly: boolean = true): void {
-		// TODO do we really want to delete everything when we hide completions?
-		// first, hide the exploration panel
-		this.dispose();
+	public getTextFromEditor(): { prefix: string; suffix: string } | void {
+		this._lastCompletions = this._config?.completions?.map(code => new PythonCode(code));
+		// First, create the prompt
 
-		// second, clean up the comment markups
-		// if commentOnly is true, we only remove the comments
-		this.removeCompletion(commentOnly);
+		// First, get the text from the editor
+		const model = this._editor.getModel();
+		if (!model) {
+			console.error(`Can't toggle Leap: model is ${model}`);
+			return;
+		}
+
+		// Get the cursor position
+		const pos = this._editor.getPosition();
+		if (pos === null) {
+			console.error(`Can't toggle Leap: cursor position is ${pos}`);
+			return;
+		}
+
+		// Get text before and after the cursor
+		// This will be our prompt
+		this._lastCursorPos = pos;
+		const lastLineIdx = model.getLineCount() - 1;
+		const lastLineWidth = model.getLineMaxColumn(lastLineIdx);
+		const prefix: string = model.getValueInRange(new Range(0, 0, this._lastCursorPos.lineNumber, this._lastCursorPos.column));
+		const suffix: string = model.getValueInRange(new Range(this._lastCursorPos.lineNumber, this._lastCursorPos.column, lastLineIdx, lastLineWidth));
+
+		return { prefix, suffix };
 	}
 
 	/**
-	 * Makes the Codex API to get completions for the given text.
-	 * Also creates the initial panel (using method createPanel)
+	 * Gets code completions. Also displays a loading page too. Returns the Completions.
+	 * Not quite a pure function as named, since it clears panel and adds loading UI elements.
+	 * It is guaranteed there will be at least one elem in returned list (either error or completion)
 	 *
-	 * @param textInBuffer The text up to the current cursor position.
+	 * @param prefix All text in editor before cursor (used in completion prompt)
+	 * @param suffix All text in editor after cursor ()
+	 * @returns List of PythonCode snippets or Errors (that can be displayed)
 	 */
-	public async getCompletions(prefix: string, suffix: string, signal: AbortSignal): Promise<Completion[]> {
-		const rs: Completion[] = [];
+	public async getCompletions(prefix: string, suffix: string): Promise<Completion[]> {
+		// somewhat redundant, as we only do this once we create the panel
+		this.clearPanel();
+
+		const results: Completion[] = [];
+
+		if (!this._panel) {
+			console.error("no panel created");
+			return results;
+		}
 
 		try {
 			// Start by putting a progress bar in the panel
-			const panel = this.createPanel();
 			const container = document.createElement('div');
 			const title = document.createElement('h2');
 			title.innerText = 'Getting suggestions. Please wait...';
@@ -334,44 +372,38 @@ class Leap implements IEditorContribution {
 			(barElement.firstElementChild! as HTMLElement).style.position = 'inherit';
 			container.appendChild(title);
 			container.appendChild(barContainer);
-			panel.appendChild(container);
+			this._panel.appendChild(container);
 
 			// TODO (lisa) bad hack to get around the references to completions
 			progressBar.done();
 
-			// TODO (lisa) bad hack below, should remove when the server logic is set up for the web version
-			// NOTE that prefix and suffix isn't actually used
+			// request the completions
+			this._lastPrompt = prefix;
 			const modelRequest = await this._utils.buildRequest(prefix, suffix);
 			this._logger.modelRequest(modelRequest);
 			const codes: string[] = await this._utils.getCompletions(
 				modelRequest,
-				signal,
+				this._abort.signal,
 				(_e) => progressBar.worked(1));
+
+			results.push(...codes.map((c) => new PythonCode(c)));
 
 			console.debug('Got the following completions from the server:\n', codes);
 
-			// Remove empty or repeated completions.
-			const set = new Set();
-			for (const code of codes) {
-				if (code === '' || set.has(code)) {
-					continue;
-				}
-				set.add(code);
-				rs.push(new PythonCode(code));
+			// if no codes found, simply just have error message
+			if (codes.length === 0) {
+				results.push(new ErrorMessage('All suggestions were empty. Please try again.'));
 			}
 
-			if (set.size === 0) {
-				rs.push(new ErrorMessage('All suggestions were empty. Please try again.'));
-			}
-
+			// clean up UI elements no longer needed for loading suggestions
 			progressBar.dispose();
+			container.remove();
 		} catch (error: any) {
-			// TODO (kas) error handling
 			if (error.message === 'canceled' || error instanceof DOMException && error.message.includes('The operation was aborted')) {
 				// This error was cancelled.
 				console.debug('Request cancelled:\n', error);
-				rs.push(new ErrorMessage("Request cancelled by the user."));
-				return rs;
+				results.push(new ErrorMessage("Request cancelled by the user."));
+				return results;
 			}
 
 			if (error.response) {
@@ -390,83 +422,73 @@ class Leap implements IEditorContribution {
 					message = error.response.data;
 				}
 
-				rs.push(new ErrorMessage(`[${code}]\n${message}`));
+				results.push(new ErrorMessage(`[${code}]\n${message}`));
 			} else {
 				console.error('Error with OpenAI API request:');
 				console.error(error);
-				rs.push(new ErrorMessage(error.message));
+				results.push(new ErrorMessage(error.message));
 			}
-		} finally {
-			console.debug("Returning the following suggestions:\n", rs);
 		}
 
-		this._logger.modelResponse(rs);
-		return rs;
+		this._logger.modelResponse(results);
+		return results;
 	}
 
 	/**
-	 * Renders all the completions in panel
-	 *
-	 * @param completions
+	 * Clears the panel of every single node, except for the compress/expand button
 	 * @returns
 	 */
-	public renderPanelContent(completions: Completion[]): HTMLElement {
-		const div = document.createElement('div');
-		div.style.overflowY = 'scroll';
-		div.style.height = '100%';
-		div.style.width = '100%';
-		div.style.display = 'inline-block';
-
-		div.onwheel = (e) => {
-			e.stopImmediatePropagation();
-		};
-
-		for (let i = 0; i < completions.length; i++) {
-			div.appendChild(this.renderCompletion(i, completions[i]));
+	private async clearPanel() {
+		if (!this._panel) {
+			return;
 		}
-
-		// const script = document.createElement('script');
-		// setInner(script, `
-		// 	function previewCompletion(id) {
-		// 		const event = new CustomEvent('leap', { completion: id });
-		// 		dispatchEvent(event);
-		// 	}`);
-		// div.appendChild(script);
-
-		return div;
-	}
-
-	public updateSuggestionDecor() {
-		switch (this._suggestionDecor) {
-			case 'bgcolor':
-				this._suggestionDecor = 'opacity';
-				break;
-			case 'opacity':
-				this._suggestionDecor = 'bgcolor';
-				break;
-			default:
-				throw new Error('Invalid suggestion decoration type');
-		}
-
-		// if there are already decorated code suggestions, update existing suggestions
-		if (this._decorationList.length > 0) {
-			this.decorateSuggestion();
+		// remove everything except the compress button, cuz we need to hide/expand panel
+		// had issues with using foreach, led to some stuff being done async?
+		// instead, gonna use a loop like this
+		let child = this._panel.firstElementChild;
+		while (child) {
+			const nextChild = child.nextElementSibling;
+			if (child.id !== "compress-button") {
+				this._panel.removeChild(child);
+			}
+			child = nextChild;
 		}
 	}
 
-	private renderCompletion(id: number, completion: Completion): HTMLElement {
-		let rs;
-
-		if (completion instanceof PythonCode) {
-			rs = this.renderPython(id, completion);
-		} else {
-			rs = this.renderError(id, completion);
+	private async displaySuggestion(index: number) {
+		if (!this._panel) {
+			console.error('displaySuggestion called with no panel! Index: ', index);
+			return;
 		}
 
-		return rs;
+		if (!this._lastCompletions ||
+			this._lastCompletions.length <= index) {
+			console.error('displaySuggestion called with invalid index. Ignoring: ', index);
+			return;
+		}
+
+		this.clearPanel();
+		this.renderNavigation(index);
+
+		const completion = this._lastCompletions[index];
+
+		// show errors
+		if (completion instanceof ErrorMessage) {
+			this.renderError(index, completion);
+			return;
+		}
+
+		// must be instance of PythonCode (python completion snippet)
+		this.renderPython(index, completion);
 	}
 
-	private renderError(_: number, error: ErrorMessage): HTMLElement {
+
+	private renderError(index: number, error: ErrorMessage) {
+		if (!this._panel) {
+			console.error('renderError called with no panel! Index: ', index);
+			return;
+		}
+
 		const block = document.createElement('div');
 		const md = new MarkdownString();
 		md.appendMarkdown('> **ERROR!**\n>\n');
@@ -487,23 +509,21 @@ class Leap implements IEditorContribution {
 
 		block.appendChild(codeWrapper);
 
-		return block;
+		this._panel.appendChild(block);
 	}
 
-	/**
-	 * Renders one instance of completion, as well as the various controls that can be done with it
-	 *
-	 * @param id
-	 * @param code
-	 * @returns
-	 */
-	private renderPython(id: number, code: PythonCode): HTMLElement {
+	private renderPython(index: number, code: PythonCode) {
+		if (!this._panel) {
+			console.error('renderPython called with no panel! Index: ', index);
+			return;
+		}
+
 		const block = document.createElement('div');
 		block.style.marginBottom = '20px';
 
 		// First, append the title
 		const title = document.createElement('h2');
-		setInner(title, `Suggestion ${id + 1}`);
+		setInner(title, `Suggestion ${index + 1}`);
 		block.appendChild(title);
 
 		// Then the links we use to communicate!
@@ -513,11 +533,10 @@ class Leap implements IEditorContribution {
 		block.appendChild(previewLink);
 		setInner(previewLink, 'Preview');
 		previewLink.onclick = (_) => {
-			this.previewCompletion(id);
+			this.previewCompletion(index);
 			this.compressPanel();
 		};
 
-		// TODO Add a "revert" link for convenience
 		const revertLink = document.createElement('a');
 		block.appendChild(revertLink);
 		setInner(revertLink, 'Revert');
@@ -533,6 +552,7 @@ class Leap implements IEditorContribution {
 		setInner(explainLink, 'Explain');
 		explainLink.style.marginLeft = "10px";
 		explainLink.onclick = (_) => {
+			this.explainCompletion(index);
 			// this.removeCompletion();
 			// this.compressPanel();
 		};
@@ -561,10 +581,99 @@ class Leap implements IEditorContribution {
 
 		block.appendChild(codeWrapper);
 
-		return block;
+		this._panel.appendChild(block);
 	}
 
-	// (lisa) why is it async?
+
+	private renderNavigation(index: number) {
+		if (!this._panel) {
+			console.error('renderNavigation called with no panel! Index: ', index);
+			return;
+		}
+
+		if (!this._lastCompletions || this._lastCompletions.length <= 1) {
+			return;
+		}
+		const div = document.createElement("div");
+		div.style.display = "flex";
+		div.style.flexDirection = "center";
+		div.style.alignItems = "center";
+		div.style.gap = "5px";
+
+		const prevLink = document.createElement("a");
+		prevLink.textContent = "< Prev";
+		prevLink.onclick = (() => {
+			this.displaySuggestion(Math.max(index - 1, 0));
+		});
+		prevLink.style.opacity = index === 0 ? '0.6' : '1';
+		div.appendChild(prevLink);
+
+		const pageNumber = document.createElement("p");
+		pageNumber.textContent = `${index + 1} / ${this._lastCompletions.length}`;
+		pageNumber.style.margin = "0";
+		div.appendChild(pageNumber);
+
+		const nextLink = document.createElement("a");
+		nextLink.textContent = "Next >";
+		nextLink.onclick = (() => {
+			if (this._lastCompletions) {
+				this.displaySuggestion(Math.min(index + 1, this._lastCompletions.length - 1));
+			}
+		});
+		nextLink.style.opacity = index === this._lastCompletions.length - 1 ? '0.6' : '1';
+		div.appendChild(nextLink);
+
+		this._panel.appendChild(div);
+	}
+
+
+	public hideCompletions(commentOnly: boolean = true): void {
+		// TODO do we really want to delete everything when we hide completions?
+		// first, hide the exploration panel
+		this.dispose();
+
+		// second, clean up the comment markups
+		// if commentOnly is true, we only remove the comments
+		this.removeCompletion(commentOnly);
+	}
+
+	public updateSuggestionDecor() {
+		switch (this._suggestionDecor) {
+			case 'bgcolor':
+				this._suggestionDecor = 'opacity';
+				break;
+			case 'opacity':
+				this._suggestionDecor = 'bgcolor';
+				break;
+			default:
+				throw new Error('Invalid suggestion decoration type');
+		}
+
+		// if there are already decorated code suggestions, update existing suggestions
+		if (this._decorationList.length > 0) {
+			this.decorateSuggestion();
+		}
+	}
+
+
+	private async explainCompletion(index: number) {
+		if (!this._lastCompletions ||
+			this._lastCompletions.length <= index) {
+			console.error('explainCompletion called with invalid index. Ignoring: ', index);
+			return;
+		}
+
+		const completion = this._lastCompletions[index];
+		if (!(completion instanceof PythonCode)) {
+			console.error(`explainCompletion called with index ${index}, but entry is an error:\n${completion.message}`);
+			return;
+		}
+
+		const codeText = completion.code;
+		const explanation = await this._utils.getExplanationsForCode(codeText, this._lastPrompt ?? "", this._abort.signal, () => { });
+		console.log("got", explanation);
+	}
+
 	private previewCompletion(index: number) {
 		// TODO (kas) error handling.
 		if (!this._lastCompletions ||

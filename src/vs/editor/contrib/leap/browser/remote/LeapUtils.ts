@@ -93,6 +93,11 @@ class RemoteUtils extends ALeapUtils {
 		return this.cleanUpCompletions(request, codes);
 	}
 
+	// TODO explanations for leaputils remote?
+	async getExplanationsForCode(code: string, origPrompt: string, signal: AbortSignal, progressCallback: (e: any) => void): Promise<string> {
+		return "";
+	}
+
 	getLogger(_editor: ICodeEditor): ILeapLogger {
 		return new LeapLogger();
 	}
