@@ -22,6 +22,7 @@ import { ITextModel } from 'vs/editor/common/model';
 import { ProgressBar } from 'vs/base/browser/ui/progressbar/progressbar';
 import { MarkdownString } from 'vs/base/common/htmlContent';
 import { editorBackground, editorErrorBackground, editorErrorBorder, editorErrorForeground, editorForeground } from 'vs/platform/theme/common/colorRegistry';
+import { clipboard } from 'electron';
 
 const htmlPolicy = window.trustedTypes?.createPolicy('leap', { createHTML: (value) => value, createScript: (value) => value });
 
@@ -66,11 +67,14 @@ class Leap implements IEditorContribution {
 	private _editor: ICodeEditor;
 	private _themeService: IThemeService;
 	private _panel: HTMLElement | undefined;
+	private _codeSection: HTMLElement | undefined;
+	private _explanationSection: HTMLElement | undefined;
+	private _testcasesSection: HTMLElement | undefined;
 	private _mdRenderer: MarkdownRenderer;
 
 	private _lastCompletions: Completion[] | undefined; // TODO (kas) This is a bad idea... we need to carefully think about how to handle state.
-	// private _lastExplanations: string[] | undefined;
-	// private _lastTestcases: string[] | undefined;
+	private _lastExplanations: string[] | undefined;
+	private _lastTestcases: (string[])[] | undefined;
 	private _lastPrompt: string | undefined;
 
 	private _lastCursorPos: IPosition | undefined;
@@ -126,11 +130,12 @@ class Leap implements IEditorContribution {
 			this._editor.onDidChangeModelContent((e) => { this.onDidChangeModelContent(e); });
 
 			// Disable projection boxes if necessary.
-			this._projectionBoxes.studyGroup = this._config.group;
+			// this._projectionBoxes.studyGroup = this._config.group;
 			// NOTE disabling projection boxes for now
-			this._projectionBoxes.changeViewMode(ViewMode.Stealth);
 			// if (this._config.group === StudyGroup.Control) {
+			// 	this._projectionBoxes.changeViewMode(ViewMode.Stealth);
 			// }
+			this._projectionBoxes.changeViewMode(ViewMode.Full);
 
 			// [lisa] Bad Hack: Disable the KeyDown handler on `Escape` in Projection Boxes
 			// For preventing the Projection Boxes to show Full View when the user presses `Escape`
@@ -309,10 +314,11 @@ class Leap implements IEditorContribution {
 		// panel is clean
 		// fetch the completions
 		this._lastCompletions = await this.getCompletions(prefix, suffix);
+		this._lastExplanations = [];
 
 		// display completions
 		// show the first page of the completions
-		this.displaySuggestion(0);
+		this.showSuggestion(0);
 
 		// Finally, update the state.
 		this.state = LeapState.Shown;
@@ -468,7 +474,7 @@ class Leap implements IEditorContribution {
 	 * @param index The index of the completions array to display this suggestion for
 	 * @returns
 	 */
-	private async displaySuggestion(index: number) {
+	private async showSuggestion(index: number) {
 		if (!this._panel) {
 			console.error('displaySuggestion called with no panel! Index: ', index);
 			return;
@@ -483,16 +489,78 @@ class Leap implements IEditorContribution {
 		this.clearPanel();
 		this.renderNavigation(index);
 
+		// show code completion
+		this._codeSection = document.createElement("div");
+		this._codeSection.style.marginBottom = "10px";
+		this._panel.appendChild(this._codeSection);
 		const completion = this._lastCompletions[index];
-
-		// show errors
 		if (completion instanceof ErrorMessage) {
 			this.renderError(index, completion);
 			return;
+		} else if (completion instanceof PythonCode) {
+			this.renderPython(index, completion);
 		}
 
-		// must be instance of PythonCode (python completion snippet)
-		this.renderPython(index, completion);
+		// show explanations
+		this._explanationSection = document.createElement("div");
+		this._explanationSection.style.marginBottom = "20px";
+		this._panel.appendChild(this._explanationSection);
+		// render the explanation if it already exists. Otherwise, don't display and let user initiate
+		if (this._lastExplanations && this._lastExplanations[index]) {
+			this.showExplanation(index);
+		}
+
+		// show test cases explanation
+		this._testcasesSection = document.createElement("div");
+		this._testcasesSection.style.marginBottom = "20px";
+		this._panel.appendChild(this._testcasesSection);
+		// render the test cases if it already exists. Otherwise, just let user initiate
+		if (this._lastTestcases && this._lastTestcases[index]) {
+			// TODO add testcase div
+			this.showTestcases(index);
+		}
+	}
+
+
+	private renderNavigation(index: number) {
+		if (!this._panel) {
+			console.error('renderNavigation called with no panel! Index: ', index);
+			return;
+		}
+
+		if (!this._lastCompletions || this._lastCompletions.length <= 1) {
+			return;
+		}
+		const div = document.createElement("div");
+		div.style.display = "flex";
+		div.style.flexDirection = "center";
+		div.style.alignItems = "center";
+		div.style.gap = "6px";
+
+		const prevLink = document.createElement("a");
+		prevLink.textContent = "< Prev";
+		prevLink.onclick = (() => {
+			this.showSuggestion(Math.max(index - 1, 0));
+		});
+		prevLink.style.opacity = index === 0 ? '0.6' : '1';
+		div.appendChild(prevLink);
+
+		const pageNumber = document.createElement("p");
+		pageNumber.textContent = `${index + 1} / ${this._lastCompletions.length}`;
+		pageNumber.style.margin = "0";
+		div.appendChild(pageNumber);
+
+		const nextLink = document.createElement("a");
+		nextLink.textContent = "Next >";
+		nextLink.onclick = (() => {
+			if (this._lastCompletions) {
+				this.showSuggestion(Math.min(index + 1, this._lastCompletions.length - 1));
+			}
+		});
+		nextLink.style.opacity = index === this._lastCompletions.length - 1 ? '0.6' : '1';
+		div.appendChild(nextLink);
+
+		this._panel.appendChild(div);
 	}
 
 	/**
@@ -503,8 +571,8 @@ class Leap implements IEditorContribution {
 	 * @returns
 	 */
 	private renderError(index: number, error: ErrorMessage) {
-		if (!this._panel) {
-			console.error('renderError called with no panel! Index: ', index);
+		if (!this._codeSection) {
+			console.error('renderError called with no panel or section! Index: ', index);
 			return;
 		}
 
@@ -528,7 +596,7 @@ class Leap implements IEditorContribution {
 
 		block.appendChild(codeWrapper);
 
-		this._panel.appendChild(block);
+		this._codeSection.appendChild(block);
 	}
 
 	/**
@@ -539,7 +607,7 @@ class Leap implements IEditorContribution {
 	 * @returns
 	 */
 	private renderPython(index: number, code: PythonCode) {
-		if (!this._panel) {
+		if (!this._codeSection) {
 			console.error('renderPython called with no panel! Index: ', index);
 			return;
 		}
@@ -548,7 +616,7 @@ class Leap implements IEditorContribution {
 		block.style.marginBottom = '20px';
 
 		// First, append the title
-		const title = document.createElement('h2');
+		const title = document.createElement('h1');
 		setInner(title, `Suggestion ${index + 1}`);
 		block.appendChild(title);
 
@@ -602,16 +670,14 @@ class Leap implements IEditorContribution {
 		codeWrapper.appendChild(this._mdRenderer.render(md).element);
 		block.appendChild(codeWrapper);
 
+		// add all the actions that we can do with the code completion
+		// wrap it with a div
 		const actionButtonsDiv = document.createElement("div");
 		actionButtonsDiv.style.display = "flex";
 		actionButtonsDiv.style.flexDirection = "row";
 		actionButtonsDiv.style.alignItems = "center";
 		actionButtonsDiv.style.gap = "12px";
 		block.appendChild(actionButtonsDiv);
-
-		const explanationDiv = document.createElement("div");
-		explanationDiv.style.marginTop = "10px";
-		block.appendChild(explanationDiv);
 
 		const testcasesDiv = document.createElement("div");
 		testcasesDiv.style.marginTop = "10px";
@@ -626,7 +692,7 @@ class Leap implements IEditorContribution {
 		explainLink.style.width = "60px";
 		explainLink.style.backgroundColor = "rgb(14, 99, 156)";
 		explainLink.onclick = (_) => {
-			this.explainCompletion(index, explanationDiv);
+			this.showExplanation(index);
 		};
 		actionButtonsDiv.appendChild(explainLink);
 
@@ -638,71 +704,21 @@ class Leap implements IEditorContribution {
 		exampleTestsLink.style.width = "100px";
 		exampleTestsLink.style.backgroundColor = "rgb(14, 99, 156)";
 		exampleTestsLink.onclick = (_) => {
-			// this.explainCompletion(index);
-			// TODO testcases
+			this.showTestcases(index);
 		};
 		actionButtonsDiv.appendChild(exampleTestsLink);
 
-		this._panel.appendChild(block);
+		this._codeSection.appendChild(block);
 	}
 
 
-	private renderNavigation(index: number) {
-		if (!this._panel) {
-			console.error('renderNavigation called with no panel! Index: ', index);
+	private async showExplanation(index: number) {
+		if (!this._explanationSection) {
+			console.error('explainCompletion called with no section. Ignoring: ', index);
 			return;
 		}
 
-		if (!this._lastCompletions || this._lastCompletions.length <= 1) {
-			return;
-		}
-		const div = document.createElement("div");
-		div.style.display = "flex";
-		div.style.flexDirection = "center";
-		div.style.alignItems = "center";
-		div.style.gap = "6px";
-
-		const prevLink = document.createElement("a");
-		prevLink.textContent = "< Prev";
-		prevLink.onclick = (() => {
-			this.displaySuggestion(Math.max(index - 1, 0));
-		});
-		prevLink.style.opacity = index === 0 ? '0.6' : '1';
-		div.appendChild(prevLink);
-
-		const pageNumber = document.createElement("p");
-		pageNumber.textContent = `${index + 1} / ${this._lastCompletions.length}`;
-		pageNumber.style.margin = "0";
-		div.appendChild(pageNumber);
-
-		const nextLink = document.createElement("a");
-		nextLink.textContent = "Next >";
-		nextLink.onclick = (() => {
-			if (this._lastCompletions) {
-				this.displaySuggestion(Math.min(index + 1, this._lastCompletions.length - 1));
-			}
-		});
-		nextLink.style.opacity = index === this._lastCompletions.length - 1 ? '0.6' : '1';
-		div.appendChild(nextLink);
-
-		this._panel.appendChild(div);
-	}
-
-
-	public hideCompletions(commentOnly: boolean = true): void {
-		// TODO do we really want to delete everything when we hide completions?
-		// first, hide the exploration panel
-		this.dispose();
-
-		// second, clean up the comment markups
-		// if commentOnly is true, we only remove the comments
-		this.removeCompletion(commentOnly);
-	}
-
-	// TODO don't pass in explanation div, not very scalable i think
-	private async explainCompletion(index: number, explanationDiv: HTMLElement) {
-		if (!this._lastCompletions ||
-			this._lastCompletions.length <= index) {
+		if (!this._lastCompletions || this._lastCompletions.length <= index) {
 			console.error('explainCompletion called with invalid index. Ignoring: ', index);
 			return;
 		}
@@ -713,34 +729,49 @@ class Leap implements IEditorContribution {
 			return;
 		}
 
-		const container = document.createElement('div');
-		const loadingTitle = document.createElement('h3');
-		loadingTitle.innerText = 'Getting explanations. Please wait...';
-		const barContainer = document.createElement('div');
-		const progressBar = new ProgressBar(barContainer).total(10);
-		const barElement = progressBar.getContainer();
-		barElement.style.position = 'inherit';
-		(barElement.firstElementChild! as HTMLElement).style.position = 'inherit';
-		container.appendChild(loadingTitle);
-		container.appendChild(barContainer);
-		explanationDiv.appendChild(container);
+		// if no explanation exists for this index, fetch it
+		// otherwise, use the cached version
+		let explanation: string | undefined = undefined;
+		if (this._lastExplanations && this._lastExplanations[index]) {
+			explanation = this._lastExplanations[index];
+		} else {
+			// create loading ui stuff
+			const container = document.createElement('div');
+			const loadingTitle = document.createElement('h3');
+			loadingTitle.innerText = 'Getting explanations. Please wait...';
+			const barContainer = document.createElement('div');
+			const progressBar = new ProgressBar(barContainer).total(10);
+			const barElement = progressBar.getContainer();
+			barElement.style.position = 'inherit';
+			(barElement.firstElementChild! as HTMLElement).style.position = 'inherit';
+			container.appendChild(loadingTitle);
+			container.appendChild(barContainer);
+			this._explanationSection.appendChild(container);
 
-		const codeText = completion.code;
-		const explanation = await this._utils.getExplanationsForCode(
-			codeText,
-			this._lastPrompt ?? "",
-			this._abort.signal,
-			(_e) => progressBar.worked(1)
-		);
-		// TODO cache explanation,
+			// fetch it using the prompt used and actual code used
+			const codeText = completion.code;
+			explanation = await this._utils.getExplanationsForCode(
+				codeText,
+				this._lastPrompt ?? "",
+				this._abort.signal,
+				(_e) => progressBar.worked(1)
+			);
 
-		progressBar.dispose();
-		container.remove();
+			// done loading, clear loading ui
+			progressBar.dispose();
+			container.remove();
 
-		console.log("got", explanation);
+			// store explanation for later use
+			if (!this._lastExplanations) {
+				this._lastExplanations = [];
+			}
+			this._lastExplanations[index] = explanation;
+		}
+
+		// render the explanation (using markdown)
 		const block = document.createElement('div');
 
-		const title = document.createElement('h3');
+		const title = document.createElement('h1');
 		title.textContent = "High Level Explanation";
 		block.appendChild(title);
 
@@ -748,7 +779,100 @@ class Leap implements IEditorContribution {
 		md.appendMarkdown(explanation);
 		block.append(this._mdRenderer.render(md).element);
 
-		explanationDiv.appendChild(block);
+		this._explanationSection.appendChild(block);
+	}
+
+	private async showTestcases(index: number) {
+		if (!this._testcasesSection) {
+			console.error('showTestcases called with no section. Ignoring: ', index);
+			return;
+		}
+
+		if (!this._lastCompletions || this._lastCompletions.length <= index) {
+			console.error('showTestcases called with invalid index. Ignoring: ', index);
+			return;
+		}
+
+		const completion = this._lastCompletions[index];
+		if (!(completion instanceof PythonCode)) {
+			console.error(`showTestcases called with index ${index}, but entry is an error:\n${completion.message}`);
+			return;
+		}
+
+		// if no testcases exist for this, fetch it
+		let testcases: string[] = [];
+		if (this._lastTestcases && this._lastTestcases[index]) {
+			testcases = this._lastTestcases[index];
+		} else {
+			// create loading ui stuff
+			const container = document.createElement('div');
+			const loadingTitle = document.createElement('h3');
+			loadingTitle.innerText = 'Getting tests. Please wait...';
+			const barContainer = document.createElement('div');
+			const progressBar = new ProgressBar(barContainer).total(10);
+			const barElement = progressBar.getContainer();
+			barElement.style.position = 'inherit';
+			(barElement.firstElementChild! as HTMLElement).style.position = 'inherit';
+			container.appendChild(loadingTitle);
+			container.appendChild(barContainer);
+			this._testcasesSection.appendChild(container);
+
+			// fetch it using the prompt used and actual code used
+			const codeText = completion.code;
+			testcases = await this._utils.getTestCasesForCode(
+				codeText,
+				this._lastPrompt ?? "",
+				this._abort.signal,
+				(_e) => progressBar.worked(1)
+			);
+
+			// done loading, clear loading ui
+			progressBar.dispose();
+			container.remove();
+			// cache it
+			if (!this._lastTestcases) {
+				this._lastTestcases = [];
+			}
+			this._lastTestcases[index] = testcases;
+		}
+
+		// render the stuff
+		// could render each invidiual testcase separately
+		// for now, treat as whole block
+		const block = document.createElement('div');
+
+		const title = document.createElement('h1');
+		title.textContent = "Example Tests";
+		block.appendChild(title);
+
+		const copyLink = document.createElement('a');
+		copyLink.textContent = "Copy";
+		copyLink.className = "monaco-button monaco-text-button";
+		copyLink.style.display = "inline";
+		copyLink.onclick = (_) => {
+			// for now, copy as a whole
+			clipboard.writeText(testcases.join("\n"));
+			this.removeCompletion(false);
+		};
+		block.appendChild(copyLink);
+
+		// for now, just render as whole
+		const md = new MarkdownString();
+		md.appendCodeblock("python", testcases.join("\n"));
+
+		const theme = this._themeService.getColorTheme();
+		const codeWrapper = document.createElement('div');
+		codeWrapper.style.padding = '10px';
+		codeWrapper.style.borderRadius = '3px';
+		codeWrapper.style.borderWidth = '1px';
+		codeWrapper.style.borderColor = theme.getColor(editorForeground)?.toString() ?? '';
+		codeWrapper.style.backgroundColor = theme.getColor(editorBackground)?.toString() ?? '';
+		codeWrapper.style.marginTop = "5px";
+		codeWrapper.style.marginBottom = "10px";
+		codeWrapper.appendChild(this._mdRenderer.render(md).element);
+		block.appendChild(codeWrapper);
+
+		this._testcasesSection.appendChild(block);
 	}
 
 	private previewCompletion(index: number) {
@@ -813,6 +937,7 @@ class Leap implements IEditorContribution {
 		this._editor.focus();
 		this._editor.setPosition(new Position(start.lineNumber + 1, start.column));
 	}
+
 
 	private removeCompletion(commentOnly: boolean = true): void {
 		// TODO (lisa) error handling.
@@ -895,6 +1020,17 @@ class Leap implements IEditorContribution {
 				Leap.ID,
 				[{ range: editRange, text: text }]);
 		}
+	}
+
+
+	public hideCompletions(commentOnly: boolean = true): void {
+		// TODO do we really want to delete everything when we hide completions?
+		// first, hide the exploration panel
+		this.dispose();
+
+		// second, clean up the comment markups
+		// if commentOnly is true, we only remove the comments
+		this.removeCompletion(commentOnly);
 	}
 
 
@@ -1004,6 +1140,14 @@ class Leap implements IEditorContribution {
 		});
 	}
 
+	public toggleProjectionBoxes() {
+		if (this._projectionBoxes.viewMode === ViewMode.Full) {
+			this._projectionBoxes.changeViewMode(ViewMode.Stealth);
+		} else {
+			this._projectionBoxes.changeViewMode(ViewMode.Full);
+		}
+		console.log("Switching projection boxes view to", this._projectionBoxes.viewMode);
+	}
 }
 
 class LeapAction extends EditorAction {
@@ -1070,6 +1214,27 @@ class LeapDecorAction extends EditorAction {
 	}
 }
 
+class ProjectionBoxesAction extends EditorAction {
+	constructor() {
+		super({
+			id: 'leap.projectionBoxes.toggle',
+			label: 'Toggle Projection Boxes',
+			alias: 'Toggle Projection Boxes',
+			precondition: undefined,
+			kbOpts: {
+				kbExpr: null,
+				primary: KeyMod.Shift | KeyMod.Alt | KeyMod.CtrlCmd | KeyCode.KeyP,
+				weight: KeybindingWeight.EditorContrib
+			}
+		});
+	}
+
+	public async run(accessor: ServicesAccessor, editor: ICodeEditor, args: any): Promise<void> {
+		const leap = Leap.get(editor);
+		leap.toggleProjectionBoxes();
+	}
+}
+
 // -------------------------------------
 // Top-level stuff
 // -------------------------------------
@@ -1085,3 +1250,6 @@ registerEditorAction(LeapEscapeAction);
 
 // Register the Leap keybinding for updating suggestion decoration
 registerEditorAction(LeapDecorAction);
+
+// toggling projection boxes
+registerEditorAction(ProjectionBoxesAction);

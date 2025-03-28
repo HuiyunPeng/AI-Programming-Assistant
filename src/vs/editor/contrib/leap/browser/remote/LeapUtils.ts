@@ -98,6 +98,10 @@ class RemoteUtils extends ALeapUtils {
 		return "";
 	}
 
+	async getTestCasesForCode(code: string, origPrompt: string, signal: AbortSignal, progressCallback: (e: any) => void): Promise<string[]> {
+		return [];
+	}
+
 	getLogger(_editor: ICodeEditor): ILeapLogger {
 		return new LeapLogger();
 	}

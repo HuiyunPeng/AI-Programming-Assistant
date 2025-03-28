@@ -34,6 +34,7 @@ export interface ILeapUtils {
 	readonly EOL: string;
 	getCompletions(request: OpenAIRequest, signal: AbortSignal, progressCallback: (e: any) => void): Promise<string[]>;
 	getExplanationsForCode(code: string, origPrompt: string, signal: AbortSignal, progressCallback: (e: any) => void): Promise<string>;
+	getTestCasesForCode(code: string, origPrompt: string, signal: AbortSignal, progressCallback: (e: any) => void): Promise<string[]>;
 	buildRequest(prefix: string, suffix: string): Promise<OpenAIRequest>;
 	getConfig(): Promise<LeapConfig>;
 	getLogger(editor: ICodeEditor): ILeapLogger;
@@ -43,6 +44,7 @@ export abstract class ALeapUtils implements ILeapUtils {
 	abstract EOL: string;
 	abstract getCompletions(request: OpenAIRequest, signal: AbortSignal, progressCallback: (e: any) => void): Promise<string[]>;
 	abstract getExplanationsForCode(code: string, origPrompt: string, signal: AbortSignal, progressCallback: (e: any) => void): Promise<string>;
+	abstract getTestCasesForCode(code: string, origPrompt: string, signal: AbortSignal, progressCallback: (e: any) => void): Promise<string[]>;
 	abstract buildRequest(prefix: string, suffix: string): Promise<OpenAIRequest>;
 	abstract getConfig(): Promise<LeapConfig>;
 	abstract getLogger(editor: ICodeEditor): ILeapLogger;

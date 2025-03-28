@@ -45,7 +45,7 @@ class LocalUtils extends ALeapUtils {
 			messages: [
 				{
 					role: "system",
-					content: "You are an expert Python programmer. You complete the user's code as best as possible. Only output the code that would complete this. You may add comments explaining it if it seems appropriate."
+					content: "You are an expert Python programmer. You complete the user's code as best as possible. Only output the code that would complete this. Do not repeat the prompt in your answer."
 				},
 				{
 					role: "user",
@@ -114,6 +114,46 @@ class LocalUtils extends ALeapUtils {
 		return response;
 	}
 
+	// TODO maybe return tests as string[] instead of one giant string?
+	async getTestCasesForCode(code: string, origPrompt: string, signal: AbortSignal, progressCallback: (e: any) => void): Promise<string[]> {
+		const completion = await this._openAi.chat.completions.create({
+			model: this._requestTemplate.model,
+			messages: [
+				{
+					role: "system",
+					content: "You are an expert Python programmer. You provide example test cases that showcase the provide code's functionality. Provide the test cases as `assert` statements in separate code blocks. Do not say anything unnecessary."
+				},
+				{
+					role: "user",
+					content: origPrompt + code
+				},
+			],
+			max_tokens: this._requestTemplate.max_tokens,
+			stream: true,
+		});
+
+		signal.onabort = ((_) => { completion.controller.abort(); });
+
+		let response = "";
+		for await (const part of completion) {
+			const delta = part.choices[0].delta.content ?? '';
+			response += delta;
+			progressCallback(part);
+		}
+
+		// separate by code blocks (assume ```py and ```)
+		const testcases: string[] = [];
+		while (response.indexOf("```") !== -1) {
+			response = response.substring(response.indexOf("```"));
+			response = response.substring(response.indexOf("\n"));
+			const testcase = response.substring(0, response.indexOf("```")).trim();
+			testcases.push(testcase);
+			response = response.substring(response.indexOf("```") + 3);
+		}
+
+		return testcases;
+	}
+
 	getLogger(editor: ICodeEditor): ILeapLogger {
 		return new LeapLogger(editor);
 	}
@@ -126,7 +166,7 @@ class LocalUtils extends ALeapUtils {
 		};
 	}
 
-	parsePromptFile(filename: string, substitutions: { [key: string]: string; }): OpenAIMessage[] {
+	parsePromptFile(filename: string, substitutions: { [key: string]: string }): OpenAIMessage[] {
 		const filePath = filename;
 
 		if (!fs.existsSync(filePath)) {
