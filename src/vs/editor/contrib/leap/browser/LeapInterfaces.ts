@@ -33,7 +33,7 @@ export { StudyGroup } from "../../rtv/browser/RTVInterfaces";
 export interface ILeapUtils {
 	readonly EOL: string;
 	getCompletions(request: OpenAIRequest, signal: AbortSignal, progressCallback: (e: any) => void): Promise<string[]>;
-	getExplanationsForCode(code: string, origPrompt: string, signal: AbortSignal, progressCallback: (e: any) => void): Promise<string>;
+	getExplanationsForCode(code: string, origPrompt: string, explanationLevel: ExplanationLevel, signal: AbortSignal, progressCallback: (e: any) => void): Promise<Explanation>;
 	getTestCasesForCode(code: string, origPrompt: string, signal: AbortSignal, progressCallback: (e: any) => void): Promise<string[]>;
 	buildRequest(prefix: string, suffix: string): Promise<OpenAIRequest>;
 	getConfig(): Promise<LeapConfig>;
@@ -43,7 +43,7 @@ export interface ILeapUtils {
 export abstract class ALeapUtils implements ILeapUtils {
 	abstract EOL: string;
 	abstract getCompletions(request: OpenAIRequest, signal: AbortSignal, progressCallback: (e: any) => void): Promise<string[]>;
-	abstract getExplanationsForCode(code: string, origPrompt: string, signal: AbortSignal, progressCallback: (e: any) => void): Promise<string>;
+	abstract getExplanationsForCode(code: string, origPrompt: string, explanationLevel: ExplanationLevel, signal: AbortSignal, progressCallback: (e: any) => void): Promise<Explanation>;
 	abstract getTestCasesForCode(code: string, origPrompt: string, signal: AbortSignal, progressCallback: (e: any) => void): Promise<string[]>;
 	abstract buildRequest(prefix: string, suffix: string): Promise<OpenAIRequest>;
 	abstract getConfig(): Promise<LeapConfig>;
@@ -88,66 +88,10 @@ export abstract class ALeapUtils implements ILeapUtils {
 
 	cleanUpCompletions(request: OpenAIRequest, codes: string[]): string[] {
 		const prompt = request.prompt;
-		// remove backticks and language part if it exists
-		// (assuming language part and actual code is separated by newline)
+
 		for (const i in codes) {
-			let completion = codes[i];
-			completion = completion.trim();
-			if (completion.startsWith("```") && completion.endsWith("```")) {
-				completion = completion.substring(completion.indexOf("\n"), completion.length - 3);
-			}
-			codes[i] = completion;
-		}
-
-		if (prompt !== null && prompt.length > 1) {
-			// The new `instruct` model *tends* to start with '\n' + indentation
-			// so we manually remove that here if it matches the end of the prompt
-			for (const i in codes) {
-				let completion = codes[i];
-				if (completion.startsWith('\n') &&
-					(prompt.endsWith(' ') || prompt.endsWith('\t'))) {
-					// Check that the prompt and completion use the same indentation
-					const indent_char: string = prompt.at(prompt.length - 1)!;
-					if (completion.at(1) !== indent_char) {
-						console.warn('Prompt and completion use different indentation characters. Skipping cleanup.');
-						continue;
-					}
-
-					completion = completion.substring(1);
-
-					// Find the prompt indent level
-					let prompt_indent = 0;
-					for (let j = prompt.length - 1; j >= 0; j--) {
-						if (prompt.at(j) !== indent_char) {
-							prompt_indent = prompt.length - j - 1;
-							break;
-						}
-					}
-
-					// Remove that many indents from the start of the completion
-					// First check that this is safe
-					let safe = true;
-					for (let j = 0; j < prompt_indent; j++) {
-						if (!completion.startsWith(indent_char)) {
-							safe = false;
-							break;
-						}
-					}
-
-					if (!safe) {
-						console.warn('Completion did not have at least the same amount of indentation as the prompt. Skipping cleanup.');
-						continue;
-					}
-
-					// We already removed the newline char earlier.
-					const new_completion = completion.substring(prompt_indent);
-					console.log('Cleaned up completion from:\n', codes[i], '\nTo:\n', new_completion);
-					codes[i] = new_completion;
-				} else {
-					console.debug('Completion did not start with newline and indentation. Skipping cleanup.');
-					continue;
-				}
-			}
+			const completion = codes[i];
+			codes[i] = this.cleanUpCode(prompt ?? "", completion);
 		}
 
 		// Remove empty or repeated completions.
@@ -162,6 +106,61 @@ export abstract class ALeapUtils implements ILeapUtils {
 		}
 
 		return rs;
+	}
+
+	cleanUpCode(prompt: string, completion: string): string {
+		// remove backticks and language part if it exists
+		// (assuming language part and actual code is separated by newline)
+		completion = completion.trim();
+		if (completion.startsWith("```") && completion.endsWith("```")) {
+			completion = completion.substring(completion.indexOf("\n"), completion.length - 3);
+		}
+		completion = completion.trim();
+
+		// from original LEAP stuff
+		// The new `instruct` model *tends* to start with '\n' + indentation
+		// so we manually remove that here if it matches the end of the prompt
+		if (prompt !== null && prompt.length > 1) {
+			if (completion.startsWith('\n') && (prompt.endsWith(' ') || prompt.endsWith('\t'))) {
+				// Check that the prompt and completion use the same indentation
+				const indent_char: string = prompt.at(prompt.length - 1)!;
+				if (completion.at(1) !== indent_char) {
+					console.warn('Prompt and completion use different indentation characters. Skipping cleanup.');
+					return completion;
+				}
+
+				completion = completion.substring(1);
+
+				// Find the prompt indent level
+				let prompt_indent = 0;
+				for (let j = prompt.length - 1; j >= 0; j--) {
+					if (prompt.at(j) !== indent_char) {
+						prompt_indent = prompt.length - j - 1;
+						break;
+					}
+				}
+
+				// Remove that many indents from the start of the completion
+				// First check that this is safe
+				let safe = true;
+				for (let j = 0; j < prompt_indent; j++) {
+					if (!completion.startsWith(indent_char)) {
+						safe = false;
+						break;
+					}
+				}
+
+				if (!safe) {
+					console.warn('Completion did not have at least the same amount of indentation as the prompt. Skipping cleanup.');
+					return completion;
+				}
+
+				// We already removed the newline char earlier.
+				completion = completion.substring(prompt_indent);
+			}
+		}
+
+		return completion;
 	}
 }
 
@@ -194,6 +193,16 @@ export class ErrorMessage {
 	constructor(public readonly message: string) { }
 }
 export type Completion = PythonCode | ErrorMessage;
+
+export enum ExplanationLevel {
+	LineByLine,
+	HighLevel
+}
+
+export type Explanation = {
+	level: ExplanationLevel;
+	explanation: string;
+};
 
 export interface ILeapLogger {
 	modelRequest(request: OpenAIRequest): Promise<void>;

@@ -1,5 +1,5 @@
 import { ICodeEditor } from 'vs/editor/browser/editorBrowser';
-import { LeapConfig, ILeapUtils, ALeapUtils, OpenAIRequest, ALeapLogger, ILeapLogger } from 'vs/editor/contrib/leap/browser/LeapInterfaces';
+import { LeapConfig, ILeapUtils, ALeapUtils, OpenAIRequest, ALeapLogger, ILeapLogger, ExplanationLevel, Explanation } from 'vs/editor/contrib/leap/browser/LeapInterfaces';
 import { LogEventData, LogResultData } from 'vs/editor/contrib/rtv/browser/RTVInterfaces';
 
 class RemoteUtils extends ALeapUtils {
@@ -94,8 +94,8 @@ class RemoteUtils extends ALeapUtils {
 	}
 
 	// TODO explanations for leaputils remote?
-	async getExplanationsForCode(code: string, origPrompt: string, signal: AbortSignal, progressCallback: (e: any) => void): Promise<string> {
-		return "";
+	async getExplanationsForCode(code: string, origPrompt: string, explanationLevel: ExplanationLevel, signal: AbortSignal, progressCallback: (e: any) => void): Promise<Explanation> {
+		return { level: ExplanationLevel.HighLevel, explanation: "" };
 	}
 
 	async getTestCasesForCode(code: string, origPrompt: string, signal: AbortSignal, progressCallback: (e: any) => void): Promise<string[]> {

@@ -14,7 +14,7 @@ import { Range } from 'vs/editor/common/core/range';
 import { IThemeService } from 'vs/platform/theme/common/themeService';
 // import { editorBackground, editorErrorBackground, editorErrorForeground, editorForeground, editorErrorBorder } from 'vs/platform/theme/common/colorRegistry';
 // import { ProgressBar } from 'vs/base/browser/ui/progressbar/progressbar';
-import { LeapConfig, ILeapUtils, PythonCode, ErrorMessage, Completion, LeapState, ILeapLogger } from 'vs/editor/contrib/leap/browser/LeapInterfaces';
+import { LeapConfig, ILeapUtils, PythonCode, ErrorMessage, Completion, LeapState, ILeapLogger, ExplanationLevel, Explanation } from 'vs/editor/contrib/leap/browser/LeapInterfaces';
 import { getUtils } from 'vs/editor/contrib/leap/browser/LeapUtils';
 import { IRTVController, ViewMode } from '../../rtv/browser/RTVInterfaces';
 import { RTVController } from '../../rtv/browser/RTVDisplay';
@@ -73,7 +73,7 @@ class Leap implements IEditorContribution {
 	private _mdRenderer: MarkdownRenderer;
 
 	private _lastCompletions: Completion[] | undefined; // TODO (kas) This is a bad idea... we need to carefully think about how to handle state.
-	private _lastExplanations: string[] | undefined;
+	private _lastExplanations: Explanation[] | undefined;
 	private _lastTestcases: (string[])[] | undefined;
 	private _lastPrompt: string | undefined;
 
@@ -219,7 +219,7 @@ class Leap implements IEditorContribution {
 			this._panel.style.top = '30px';
 			this._panel.style.bottom = '14px';
 			this._panel.style.right = '14px';
-			this._panel.style.width = '600px';
+			this._panel.style.width = '700px';
 			this._panel.style.padding = '10px';
 			this._panel.style.transitionProperty = 'all';
 			this._panel.style.transitionDuration = '0.2s';
@@ -272,7 +272,7 @@ class Leap implements IEditorContribution {
 		// NOTE: Technically this is never needed since we create panel only when toggling
 		// when we toggle off, interestingly we delete the panel
 		// Clear the panel content
-		this.clearPanel();
+		this.clearElement(this._panel);
 
 		this._logger.panelOpen();
 
@@ -283,7 +283,7 @@ class Leap implements IEditorContribution {
 		this._logger.panelUnfocus();
 
 		if (this._panel) {
-			this._panel.style.right = '-400px';
+			this._panel.style.right = '-500px';
 			this._panel!.style.zIndex = '0';
 			this._panel.style.opacity = '0.3';
 		}
@@ -363,9 +363,6 @@ class Leap implements IEditorContribution {
 	 * @returns List of PythonCode snippets or Errors (that can be displayed)
 	 */
 	public async getCompletions(prefix: string, suffix: string): Promise<Completion[]> {
-		// somewhat redundant, as we only do this once we create the panel
-		this.clearPanel();
-
 		const results: Completion[] = [];
 
 		if (!this._panel) {
@@ -448,22 +445,16 @@ class Leap implements IEditorContribution {
 	}
 
 	/**
-	 * Clears the panel of every single node, except for the compress/expand button
+	 * Clears the elem of every single child node
 	 * @returns
 	 */
-	private async clearPanel() {
-		if (!this._panel) {
-			return;
-		}
-		// remove everything except the compress button, cuz we need to hide/expand panel
+	private clearElement(elem: HTMLElement) {
 		// had issues with using foreach, led to some stuff being done async?
-		// instead, gonna use a loop like this
-		let child = this._panel.firstElementChild;
+		// instead, gonna use a loop like this, more deterministic
+		let child = elem.firstElementChild;
 		while (child) {
 			const nextChild = child.nextElementSibling;
-			if (child.id !== "compress-button") {
-				this._panel.removeChild(child);
-			}
+			elem.removeChild(child);
 			child = nextChild;
 		}
 	}
@@ -480,13 +471,12 @@ class Leap implements IEditorContribution {
 			return;
 		}
 
-		if (!this._lastCompletions ||
-			this._lastCompletions.length <= index) {
+		if (!this._lastCompletions || this._lastCompletions.length <= index) {
 			console.error('displaySuggestion called with invalid index. Ignoring: ', index);
 			return;
 		}
 
-		this.clearPanel();
+		this.clearElement(this._panel);
 		this.renderNavigation(index);
 
 		// show code completion
@@ -498,7 +488,7 @@ class Leap implements IEditorContribution {
 			this.renderError(index, completion);
 			return;
 		} else if (completion instanceof PythonCode) {
-			this.renderPython(index, completion);
+			this.renderPython(index);
 		}
 
 		// show explanations
@@ -606,11 +596,24 @@ class Leap implements IEditorContribution {
 	 * @param code
 	 * @returns
 	 */
-	private renderPython(index: number, code: PythonCode) {
+	private renderPython(index: number) {
 		if (!this._codeSection) {
 			console.error('renderPython called with no panel! Index: ', index);
 			return;
 		}
+
+		if (!this._lastCompletions || this._lastCompletions.length <= index) {
+			console.error('renderPython called with invalid index. Ignoring: ', index);
+			return;
+		}
+
+		const completion = this._lastCompletions[index];
+		if (!(completion instanceof PythonCode)) {
+			console.error(`showTestcases called with index ${index}, but entry is an error:\n${completion.message}`);
+			return;
+		}
+
+		this.clearElement(this._codeSection);
 
 		const block = document.createElement('div');
 		block.style.marginBottom = '20px';
@@ -646,16 +649,15 @@ class Leap implements IEditorContribution {
 		};
 		block.appendChild(revertLink);
 
-		let completion = code.code;
-
+		let completionCode = completion.code;
 		// Prepend whitespace if necessary
 		if (this._lastCursorPos?.column) {
-			completion = ' '.repeat(this._lastCursorPos.column - 1) + completion;
+			completionCode = ' '.repeat(this._lastCursorPos.column - 1) + completionCode;
 		}
 
 		// add the code block itself
 		const md = new MarkdownString();
-		md.appendCodeblock("python", completion);
+		md.appendCodeblock("python", completionCode);
 
 		// Style it!
 		const theme = this._themeService.getColorTheme();
@@ -673,35 +675,44 @@ class Leap implements IEditorContribution {
 		// add all the actions that we can do with the code completion
 		// wrap it with a div
 		const actionButtonsDiv = document.createElement("div");
-		actionButtonsDiv.style.display = "flex";
-		actionButtonsDiv.style.flexDirection = "row";
-		actionButtonsDiv.style.alignItems = "center";
-		actionButtonsDiv.style.gap = "12px";
 		block.appendChild(actionButtonsDiv);
 
-		const testcasesDiv = document.createElement("div");
-		testcasesDiv.style.marginTop = "10px";
-		testcasesDiv.style.marginBottom = "30px";
-		block.appendChild(testcasesDiv);
-
-		const explainLink = document.createElement('a');
-		explainLink.textContent = "Explain";
-		explainLink.className = "monaco-button monaco-text-button";
-		explainLink.style.color = "white";
-		explainLink.style.display = "block";
-		explainLink.style.width = "60px";
-		explainLink.style.backgroundColor = "rgb(14, 99, 156)";
-		explainLink.onclick = (_) => {
-			this.showExplanation(index);
+		const explainOverviewLink = document.createElement('a');
+		explainOverviewLink.textContent = "Explain Overview";
+		explainOverviewLink.className = "monaco-button monaco-text-button";
+		explainOverviewLink.style.color = "white";
+		explainOverviewLink.style.display = "inline-block";
+		explainOverviewLink.style.width = "fit-content";
+		explainOverviewLink.style.marginRight = "12px";
+		explainOverviewLink.style.padding = "4px 10px";
+		explainOverviewLink.style.backgroundColor = "rgb(14, 99, 156)";
+		explainOverviewLink.onclick = (_) => {
+			this.showExplanation(index, ExplanationLevel.HighLevel);
 		};
-		actionButtonsDiv.appendChild(explainLink);
+		actionButtonsDiv.appendChild(explainOverviewLink);
+
+		const explainLineLink = document.createElement('a');
+		explainLineLink.textContent = "Add Line-by-Line Comments";
+		explainLineLink.className = "monaco-button monaco-text-button";
+		explainLineLink.style.color = "white";
+		explainLineLink.style.display = "inline-block";
+		explainLineLink.style.width = "fit-content";
+		explainLineLink.style.marginRight = "12px";
+		explainLineLink.style.padding = "4px 10px";
+		explainLineLink.style.backgroundColor = "rgb(14, 99, 156)";
+		explainLineLink.onclick = (_) => {
+			this.showExplanation(index, ExplanationLevel.LineByLine);
+		};
+		actionButtonsDiv.appendChild(explainLineLink);
 
 		const exampleTestsLink = document.createElement('a');
 		exampleTestsLink.textContent = "Example Tests";
 		exampleTestsLink.className = "monaco-button monaco-text-button";
 		exampleTestsLink.style.color = "white";
-		exampleTestsLink.style.display = "block";
-		exampleTestsLink.style.width = "100px";
+		exampleTestsLink.style.display = "inline-block";
+		exampleTestsLink.style.width = "fit-content";
+		exampleTestsLink.style.marginRight = "12px";
+		exampleTestsLink.style.padding = "4px 10px";
 		exampleTestsLink.style.backgroundColor = "rgb(14, 99, 156)";
 		exampleTestsLink.onclick = (_) => {
 			this.showTestcases(index);
@@ -712,7 +723,7 @@ class Leap implements IEditorContribution {
 	}
 
 
-	private async showExplanation(index: number) {
+	private async showExplanation(index: number, explanationLevel?: ExplanationLevel) {
 		if (!this._explanationSection) {
 			console.error('explainCompletion called with no section. Ignoring: ', index);
 			return;
@@ -729,12 +740,21 @@ class Leap implements IEditorContribution {
 			return;
 		}
 
+
 		// if no explanation exists for this index, fetch it
 		// otherwise, use the cached version
-		let explanation: string | undefined = undefined;
-		if (this._lastExplanations && this._lastExplanations[index]) {
+		let explanation: Explanation | undefined = undefined;
+		if (this._lastExplanations && this._lastExplanations[index] && explanationLevel !== ExplanationLevel.LineByLine) {
 			explanation = this._lastExplanations[index];
 		} else {
+			// NOTE added exception for line comments for now
+			if (explanationLevel !== ExplanationLevel.LineByLine) {
+				this.clearElement(this._explanationSection);
+			}
+			if (explanationLevel === undefined) {
+				console.error("showExplanation: no explanation level provided!");
+				return;
+			}
 			// create loading ui stuff
 			const container = document.createElement('div');
 			const loadingTitle = document.createElement('h3');
@@ -753,6 +773,7 @@ class Leap implements IEditorContribution {
 			explanation = await this._utils.getExplanationsForCode(
 				codeText,
 				this._lastPrompt ?? "",
+				explanationLevel,
 				this._abort.signal,
 				(_e) => progressBar.worked(1)
 			);
@@ -762,22 +783,37 @@ class Leap implements IEditorContribution {
 			container.remove();
 
 			// store explanation for later use
-			if (!this._lastExplanations) {
-				this._lastExplanations = [];
+			// yea treating line-by-line explanations differently, ask vincent
+			if (explanationLevel === ExplanationLevel.HighLevel) {
+				if (!this._lastExplanations) {
+					this._lastExplanations = [];
+				}
+				this._lastExplanations[index] = explanation;
+			} else {
+				if (this._lastCompletions) {
+					// completely replace the old code with new code but with comments
+					this._lastCompletions[index] = new PythonCode(explanation.explanation);
+				}
 			}
-			this._lastExplanations[index] = explanation;
 		}
 
 		// render the explanation (using markdown)
 		const block = document.createElement('div');
 
-		const title = document.createElement('h1');
-		title.textContent = "High Level Explanation";
-		block.appendChild(title);
+		const title = document.createElement('h2');
+		if (explanation.level === ExplanationLevel.HighLevel) {
+			this.clearElement(this._explanationSection);
+			title.textContent = "High Level Explanation";
+			block.appendChild(title);
+			const md = new MarkdownString();
+			md.appendMarkdown(explanation.explanation);
+			block.append(this._mdRenderer.render(md).element);
+		} else if (explanation.level === ExplanationLevel.LineByLine) {
+			// (vincent) mind sorcerey im too lazy to explain for now lmao
+			this.renderPython(index);
+		}
 
-		const md = new MarkdownString();
-		md.appendMarkdown(explanation);
-		block.append(this._mdRenderer.render(md).element);
+
 
 		this._explanationSection.appendChild(block);
 	}
@@ -798,6 +834,8 @@ class Leap implements IEditorContribution {
 			console.error(`showTestcases called with index ${index}, but entry is an error:\n${completion.message}`);
 			return;
 		}
+
+		this.clearElement(this._testcasesSection);
 
 		// if no testcases exist for this, fetch it
 		let testcases: string[] = [];
@@ -841,7 +879,7 @@ class Leap implements IEditorContribution {
 		// for now, treat as whole block
 		const block = document.createElement('div');
 
-		const title = document.createElement('h1');
+		const title = document.createElement('h2');
 		title.textContent = "Example Tests";
 		block.appendChild(title);
 

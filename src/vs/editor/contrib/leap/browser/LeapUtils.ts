@@ -2,9 +2,10 @@ import OpenAI from 'openai';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { ALeapLogger, ILeapLogger, LeapConfig, ILeapUtils, ALeapUtils, OpenAIMessage, OpenAIRequest } from 'vs/editor/contrib/leap/browser/LeapInterfaces';
+import { ALeapLogger, ILeapLogger, LeapConfig, ILeapUtils, ALeapUtils, OpenAIMessage, OpenAIRequest, ExplanationLevel, Explanation } from 'vs/editor/contrib/leap/browser/LeapInterfaces';
 import { StudyGroup } from '../../rtv/browser/RTVInterfaces';
 import { ICodeEditor } from 'vs/editor/browser/editorBrowser';
+import { ChatCompletionMessageParam } from 'openai/resources/chat/completions';
 
 
 class LocalUtils extends ALeapUtils {
@@ -75,27 +76,36 @@ class LocalUtils extends ALeapUtils {
 
 	// TODO add granuarlity for different levels of explanations
 	// for now, we do high level
-	async getExplanationsForCode(code: string, origPrompt: string, signal: AbortSignal, progressCallback: (e: any) => void): Promise<string> {
+	async getExplanationsForCode(code: string, origPrompt: string, explanationLevel: ExplanationLevel, signal: AbortSignal, progressCallback: (e: any) => void): Promise<Explanation> {
+		const messages: ChatCompletionMessageParam[] = [
+			{
+				role: "system",
+				content: "You are an expert Python programmer. You assist the user by completing code and explaining it when necessary. Only provide an explanation of the code you produced. When explaining, only provide the level of detail that the user requests for, and do not include the user's prompt. Do not say anything unnecessary."
+			},
+			{
+				role: "user",
+				content: origPrompt ?? ""
+			},
+			{
+				role: "assistant",
+				content: code
+			},
+		];
+
+		if (explanationLevel === ExplanationLevel.HighLevel) {
+			messages.push({
+				role: "user",
+				content: "Please provide a high-level explaination of what this code does."
+			});
+		} else if (explanationLevel === ExplanationLevel.LineByLine) {
+			messages.push({
+				role: "user",
+				content: "Please add comments to this code completion explaining the purpose of each line or section. Only output the code completion you provided and the associated comments. Do not output my original prompt."
+			});
+		}
 		const completion = await this._openAi.chat.completions.create({
 			model: this._requestTemplate.model,
-			messages: [
-				{
-					role: "system",
-					content: "You are an expert Python programmer. You assist the user by completing code and explaining it when necessary. When explaining, only provide the level of detail that the user requests for. Do not say anything unnecessary."
-				},
-				{
-					role: "user",
-					content: origPrompt ?? ""
-				},
-				{
-					role: "assistant",
-					content: code
-				},
-				{
-					role: "user",
-					content: "Please provide a high-level explaination of what this code does."
-				}
-			],
+			messages,
 			max_tokens: this._requestTemplate.max_tokens,
 			stream: true,
 		});
@@ -110,8 +120,15 @@ class LocalUtils extends ALeapUtils {
 		}
 
 		// clean up completion if needed
+		if (explanationLevel === ExplanationLevel.LineByLine) {
+			response = this.cleanUpCode(origPrompt, response);
+			console.log("got", response);
+		}
 
-		return response;
+		return {
+			level: explanationLevel,
+			explanation: response,
+		};
 	}
 
 	// TODO maybe return tests as string[] instead of one giant string?
