@@ -14,7 +14,7 @@ import { Range } from 'vs/editor/common/core/range';
 import { IThemeService } from 'vs/platform/theme/common/themeService';
 // import { editorBackground, editorErrorBackground, editorErrorForeground, editorForeground, editorErrorBorder } from 'vs/platform/theme/common/colorRegistry';
 // import { ProgressBar } from 'vs/base/browser/ui/progressbar/progressbar';
-import { LeapConfig, ILeapUtils, PythonCode, ErrorMessage, Completion, LeapState, ILeapLogger, ExplanationLevel, Explanation } from 'vs/editor/contrib/leap/browser/LeapInterfaces';
+import { LeapConfig, ILeapUtils, PythonCode, ErrorMessage, Completion, LeapState, ILeapLogger } from 'vs/editor/contrib/leap/browser/LeapInterfaces';
 import { getUtils } from 'vs/editor/contrib/leap/browser/LeapUtils';
 import { IRTVController, ViewMode } from '../../rtv/browser/RTVInterfaces';
 import { RTVController } from '../../rtv/browser/RTVDisplay';
@@ -23,6 +23,8 @@ import { ProgressBar } from 'vs/base/browser/ui/progressbar/progressbar';
 import { MarkdownString } from 'vs/base/common/htmlContent';
 import { editorBackground, editorErrorBackground, editorErrorBorder, editorErrorForeground, editorForeground } from 'vs/platform/theme/common/colorRegistry';
 import { clipboard } from 'electron';
+import { ChatCompletionMessageParam } from 'openai/resources';
+import { getCodeCompletions, getConvoResponse, getLineCommentsExplanation, getOverviewExplanation, summarizeConvo } from 'vs/editor/contrib/leap/browser/Chat';
 
 const htmlPolicy = window.trustedTypes?.createPolicy('leap', { createHTML: (value) => value, createScript: (value) => value });
 
@@ -66,16 +68,54 @@ class Leap implements IEditorContribution {
 
 	private _editor: ICodeEditor;
 	private _themeService: IThemeService;
-	private _panel: HTMLElement | undefined;
-	private _codeSection: HTMLElement | undefined;
-	private _explanationSection: HTMLElement | undefined;
-	private _testcasesSection: HTMLElement | undefined;
 	private _mdRenderer: MarkdownRenderer;
 
-	private _lastCompletions: Completion[] | undefined; // TODO (kas) This is a bad idea... we need to carefully think about how to handle state.
-	private _lastExplanations: Explanation[] | undefined;
-	private _lastTestcases: (string[])[] | undefined;
-	private _lastPrompt: string | undefined;
+	private panel: HTMLElement | undefined;
+	private codeSection: HTMLElement | undefined;
+	private explanationSection: HTMLElement | undefined;
+	private testcasesSection: HTMLElement | undefined;
+	private convoSection: HTMLElement | undefined;
+	private actionBar: HTMLElement | undefined;
+
+	// private _lastCompletions: Completion[] | undefined;
+	// private _lastExplanations: Explanation[] | undefined;
+	// private _lastTestcases: (string[])[] | undefined;
+	// private _lastPrompt: string | undefined;
+
+	// TODO
+	private codePrompt: string | undefined;
+	private completions: Completion[] | undefined;
+	private overviewExplanation: string | undefined;
+	private lineComments: string | undefined;
+	private testcases: string[] | undefined;
+	private convo: ChatCompletionMessageParam[] = [];
+
+	private highlightingCode = false;
+
+	private viewingLineComments = false;
+	private copiedLineComments = false;
+	private explanationLevelSummary: string | undefined;
+
+	// max verbosity is 5
+	private verbosityLevel = 5;
+	private convoElements: Record<number, HTMLElement> = {};
+	private visibleConvoElements: Record<number, boolean> = {};
+
+	private metrics = {
+		numShortened: 0,
+		numExpanded: 0,
+	};
+
+	// private metrics = {
+	// 	totalHighLevelExplanationsAsked: 0,
+	// 	totalLineExplanationsAsked: 0,
+	// 	totalTestcasesAsked: 0,
+
+	// 	topicsNeedExplain: [] as string[],
+	// 	topicsHighLevelExplanationsCount: {} as Record<string, number>,
+	// 	topicsLineExplanationsCount: {} as Record<string, number>,
+	// 	topicsTestcasesCount: {} as Record<string, number>,
+	// };
 
 	private _lastCursorPos: IPosition | undefined;
 	private _state: LeapState = LeapState.Off;
@@ -128,6 +168,13 @@ class Leap implements IEditorContribution {
 			// });
 
 			this._editor.onDidChangeModelContent((e) => { this.onDidChangeModelContent(e); });
+			this._editor.onDidChangeCursorSelection((e) => {
+				if (!e.selection.isEmpty() && this.getHighlightedTextFromEditor()) {
+					this.highlightingCode = true;
+				} else {
+					this.highlightingCode = false;
+				}
+			});
 
 			// Disable projection boxes if necessary.
 			// this._projectionBoxes.studyGroup = this._config.group;
@@ -160,15 +207,27 @@ class Leap implements IEditorContribution {
 		return this._state;
 	}
 
-	public dispose(): void {
+	public async dispose() {
 		this._logger.panelClose();
-		this._panel?.remove();
-		this._panel = undefined;
+		this.panel?.remove();
+		this.panel = undefined;
+
+		// don't include curr explanation prefs in system
+		// analyze the current convo without it
+		this.convo[0].content = "You are an expert programmer. You assist the user by completing code and explaining it when necessary.";
+		const summary = await summarizeConvo(this.convo, this._abort.signal);
+		console.log("Summary:", summary);
+		this.explanationLevelSummary = summary;
+		this.lineComments = undefined;
+		this.codePrompt = undefined;
+		this.completions = undefined;
+		this.overviewExplanation = undefined;
+		this.lineComments = undefined;
+		this.convo = [];
+
 	}
 
 	public async toggle(): Promise<void> {
-		// TODO (kas) We should probably think more carefully about the interface for interacting
-		//  with leap. For now, this will do as a simple on-off toggle.
 		this._abort.abort();
 		const abort = new AbortController();
 		this._abort = abort;
@@ -178,7 +237,7 @@ class Leap implements IEditorContribution {
 			case LeapState.Loading:
 				// Just start!
 				this.state = LeapState.Loading;
-				await this.initPanel();
+				await this.startCompletion();
 				break;
 			case LeapState.Shown:
 				this.hideCompletions();
@@ -205,36 +264,37 @@ class Leap implements IEditorContribution {
 	 * Clears the content if it does.
 	 */
 	public createPanel(): HTMLElement {
-		if (!this._panel) {
+		if (!this.panel) {
 			const editor_div = this._editor.getDomNode();
 			if (!editor_div) {
 				throw new Error('Editor Div does not exist. This should not happen.');
 			}
 
-			this._panel = document.createElement('div');
+			this.panel = document.createElement('div');
 
 			// Set the panel style
-			this._panel.className = 'monaco-hover';
-			this._panel.style.position = 'absolute';
-			this._panel.style.top = '30px';
-			this._panel.style.bottom = '14px';
-			this._panel.style.right = '14px';
-			this._panel.style.width = '700px';
-			this._panel.style.padding = '10px';
-			this._panel.style.transitionProperty = 'all';
-			this._panel.style.transitionDuration = '0.2s';
-			this._panel.style.transitionDelay = '0s';
-			this._panel.style.transitionTimingFunction = 'ease';
-			this._panel.style.overflowX = 'visible';
+			this.panel.className = 'monaco-hover';
+			this.panel.style.position = 'absolute';
+			this.panel.style.top = '30px';
+			this.panel.style.bottom = '14px';
+			this.panel.style.right = '14px';
+			this.panel.style.width = '700px';
+			this.panel.style.padding = '10px';
+			this.panel.style.transitionProperty = 'all';
+			this.panel.style.transitionDuration = '0.2s';
+			this.panel.style.transitionDelay = '0s';
+			this.panel.style.transitionTimingFunction = 'ease';
+			this.panel.style.overflowX = 'visible';
 			// this._panel.style.overflowY = 'clip';
-			this._panel.style.overflowY = 'auto';
-			this._panel.onwheel = (e) => {
+			this.panel.style.overflowY = 'auto';
+			// this._panel.style.userSelect = "text";
+			this.panel.onwheel = (e) => {
 				e.stopImmediatePropagation();
 			};
-			this._panel.onmouseenter = (e) => {
+			this.panel.onmouseenter = (e) => {
 				this.expandPanel();
 			};
-			this._panel.onmouseleave = (e) => {
+			this.panel.onmouseleave = (e) => {
 				if (e.offsetY < 0 || e.offsetX < 0) {
 					this.compressPanel();
 				}
@@ -266,41 +326,41 @@ class Leap implements IEditorContribution {
 			// };
 			// this._panel.appendChild(compressButton);
 
-			editor_div.appendChild(this._panel);
+			editor_div.appendChild(this.panel);
 		}
 
 		// NOTE: Technically this is never needed since we create panel only when toggling
 		// when we toggle off, interestingly we delete the panel
 		// Clear the panel content
-		this.clearElement(this._panel);
+		this.clearElement(this.panel);
 
 		this._logger.panelOpen();
 
-		return this._panel;
+		return this.panel;
 	}
 
 	public compressPanel(): void {
 		this._logger.panelUnfocus();
 
-		if (this._panel) {
-			this._panel.style.right = '-500px';
-			this._panel!.style.zIndex = '0';
-			this._panel.style.opacity = '0.3';
+		if (this.panel) {
+			this.panel.style.right = '-500px';
+			this.panel!.style.zIndex = '0';
+			this.panel.style.opacity = '0.3';
 		}
 	}
 
 	public expandPanel(): void {
 		this._logger.panelFocus();
 
-		if (this._panel) {
-			this._panel.style.right = '14px';
-			this._panel!.style.zIndex = '1000';
-			this._panel.style.opacity = '1';
+		if (this.panel) {
+			this.panel.style.right = '14px';
+			this.panel!.style.zIndex = '1000';
+			this.panel.style.opacity = '1';
 		}
 	}
 
-	public async initPanel(): Promise<void> {
-		// first, create the panel
+	public async startCompletion(): Promise<void> {
+		// first, create and clear the panel
 		this.createPanel();
 
 		// get text of editor to work with for ai stuff and create prompt
@@ -313,19 +373,36 @@ class Leap implements IEditorContribution {
 
 		// panel is clean
 		// fetch the completions
-		this._lastCompletions = await this.getCompletions(prefix, suffix);
-		this._lastExplanations = [];
+		this.completions = await this.getCompletions(prefix, suffix);
+		this.convo.push(
+			{
+				role: 'system',
+				content: "You are an expert programmer. You assist the user by completing code and explaining it when necessary." + (this.explanationLevelSummary ? ` You are also aware that the user prefers the following type of explanations: ${this.explanationLevelSummary}. When explaining, provide the level of detail according to these preferences.` : " When explaining, provide the level of detail that the user requests for.") + " Do not include the user's prompt, and do not say anything unnecessary."
+			},
+			{
+				role: 'user',
+				content: prefix,
+			},
+			{
+				role: "assistant",
+				content: this.completions && this.completions.length > 0 && this.completions[0] instanceof PythonCode ? this.completions[0].code : "",
+			}
+		);
+		// this._lastCompletions = await this.getCompletions(prefix, suffix);
+		this.overviewExplanation = undefined;
 
 		// display completions
 		// show the first page of the completions
-		this.showSuggestion(0);
+		this.renderCompletionPage();
 
 		// Finally, update the state.
 		this.state = LeapState.Shown;
+		this.previewCompletion();
 	}
 
+
 	public getTextFromEditor(): { prefix: string; suffix: string } | void {
-		this._lastCompletions = this._config?.completions?.map(code => new PythonCode(code));
+		// this._lastCompletions = this._config?.completions?.map(code => new PythonCode(code));
 		// First, create the prompt
 
 		// First, get the text from the editor
@@ -347,10 +424,24 @@ class Leap implements IEditorContribution {
 		this._lastCursorPos = pos;
 		const lastLineIdx = model.getLineCount() - 1;
 		const lastLineWidth = model.getLineMaxColumn(lastLineIdx);
-		const prefix: string = model.getValueInRange(new Range(0, 0, this._lastCursorPos.lineNumber, this._lastCursorPos.column));
-		const suffix: string = model.getValueInRange(new Range(this._lastCursorPos.lineNumber, this._lastCursorPos.column, lastLineIdx, lastLineWidth));
+		const prefix: string = model.getValueInRange(new Range(0, 0, pos.lineNumber, pos.column));
+		const suffix: string = model.getValueInRange(new Range(pos.lineNumber, pos.column, lastLineIdx, lastLineWidth));
 
 		return { prefix, suffix };
+	}
+
+	public getHighlightedTextFromEditor(): string | void {
+		const model = this._editor.getModel();
+		if (!model) {
+			return;
+		}
+
+		const selection = this._editor.getSelection();
+		if (selection === null) {
+			return;
+		}
+
+		return model.getValueInRange(selection);
 	}
 
 	/**
@@ -365,7 +456,7 @@ class Leap implements IEditorContribution {
 	public async getCompletions(prefix: string, suffix: string): Promise<Completion[]> {
 		const results: Completion[] = [];
 
-		if (!this._panel) {
+		if (!this.panel) {
 			console.error("no panel created");
 			return results;
 		}
@@ -374,7 +465,7 @@ class Leap implements IEditorContribution {
 			// Start by putting a progress bar in the panel
 			const container = document.createElement('div');
 			const title = document.createElement('h2');
-			title.innerText = 'Getting suggestions. Please wait...';
+			title.innerText = 'Getting suggestion. Please wait...';
 			const barContainer = document.createElement('div');
 			const progressBar = new ProgressBar(barContainer).total(10);
 			const barElement = progressBar.getContainer();
@@ -382,19 +473,15 @@ class Leap implements IEditorContribution {
 			(barElement.firstElementChild! as HTMLElement).style.position = 'inherit';
 			container.appendChild(title);
 			container.appendChild(barContainer);
-			this._panel.appendChild(container);
-
-			// TODO (lisa) bad hack to get around the references to completions
-			// progressBar.done();
+			this.panel.appendChild(container);
 
 			// request the completions
-			this._lastPrompt = prefix;
-			const modelRequest = await this._utils.buildRequest(prefix, suffix);
-			this._logger.modelRequest(modelRequest);
-			const codes: string[] = await this._utils.getCompletions(
-				modelRequest,
+			this.codePrompt = prefix;
+			const codes = await getCodeCompletions(
+				this.codePrompt,
 				this._abort.signal,
-				(_e) => progressBar.worked(1));
+				(_e) => progressBar.worked(1)
+			);
 
 			results.push(...codes.map((c) => new PythonCode(c)));
 
@@ -465,92 +552,46 @@ class Leap implements IEditorContribution {
 	 * @param index The index of the completions array to display this suggestion for
 	 * @returns
 	 */
-	private async showSuggestion(index: number) {
-		if (!this._panel) {
-			console.error('displaySuggestion called with no panel! Index: ', index);
+	private async renderCompletionPage() {
+		if (!this.panel) {
+			console.error('displaySuggestion called with no panel!');
 			return;
 		}
 
-		if (!this._lastCompletions || this._lastCompletions.length <= index) {
-			console.error('displaySuggestion called with invalid index. Ignoring: ', index);
+		if (!this.completions || this.completions.length <= 0) {
+			console.error('displaySuggestion called with nothing');
 			return;
 		}
 
-		this.clearElement(this._panel);
-		this.renderNavigation(index);
+		this.clearElement(this.panel);
 
 		// show code completion
-		this._codeSection = document.createElement("div");
-		this._codeSection.style.marginBottom = "10px";
-		this._panel.appendChild(this._codeSection);
-		const completion = this._lastCompletions[index];
+		this.codeSection = document.createElement("div");
+		this.codeSection.style.marginBottom = "10px";
+		this.panel.appendChild(this.codeSection);
+		const completion = this.completions[0];
 		if (completion instanceof ErrorMessage) {
-			this.renderError(index, completion);
+			this.renderError();
 			return;
 		} else if (completion instanceof PythonCode) {
-			this.renderPython(index);
+			this.renderPython();
 		}
 
-		// show explanations
-		this._explanationSection = document.createElement("div");
-		this._explanationSection.style.marginBottom = "20px";
-		this._panel.appendChild(this._explanationSection);
-		// render the explanation if it already exists. Otherwise, don't display and let user initiate
-		if (this._lastExplanations && this._lastExplanations[index]) {
-			this.showExplanation(index);
-		}
+		// show explanation
+		this.explanationSection = document.createElement("div");
+		this.explanationSection.style.marginBottom = "10px";
+		this.panel.appendChild(this.explanationSection);
+		// this.showExplanation();
 
-		// show test cases explanation
-		this._testcasesSection = document.createElement("div");
-		this._testcasesSection.style.marginBottom = "20px";
-		this._panel.appendChild(this._testcasesSection);
-		// render the test cases if it already exists. Otherwise, just let user initiate
-		if (this._lastTestcases && this._lastTestcases[index]) {
-			// TODO add testcase div
-			this.showTestcases(index);
-		}
-	}
+		// show convo
+		this.convoSection = document.createElement("div");
+		this.convoSection.style.borderTop = "2px solid gray";
+		this.convoSection.style.paddingTop = "20px";
+		this.convoSection.style.marginBottom = "10px";
+		this.panel.appendChild(this.convoSection);
 
-
-	private renderNavigation(index: number) {
-		if (!this._panel) {
-			console.error('renderNavigation called with no panel! Index: ', index);
-			return;
-		}
-
-		if (!this._lastCompletions || this._lastCompletions.length <= 1) {
-			return;
-		}
-		const div = document.createElement("div");
-		div.style.display = "flex";
-		div.style.flexDirection = "center";
-		div.style.alignItems = "center";
-		div.style.gap = "6px";
-
-		const prevLink = document.createElement("a");
-		prevLink.textContent = "< Prev";
-		prevLink.onclick = (() => {
-			this.showSuggestion(Math.max(index - 1, 0));
-		});
-		prevLink.style.opacity = index === 0 ? '0.6' : '1';
-		div.appendChild(prevLink);
-
-		const pageNumber = document.createElement("p");
-		pageNumber.textContent = `${index + 1} / ${this._lastCompletions.length}`;
-		pageNumber.style.margin = "0";
-		div.appendChild(pageNumber);
-
-		const nextLink = document.createElement("a");
-		nextLink.textContent = "Next >";
-		nextLink.onclick = (() => {
-			if (this._lastCompletions) {
-				this.showSuggestion(Math.min(index + 1, this._lastCompletions.length - 1));
-			}
-		});
-		nextLink.style.opacity = index === this._lastCompletions.length - 1 ? '0.6' : '1';
-		div.appendChild(nextLink);
-
-		this._panel.appendChild(div);
+		// show actions at bottom of panel
+		this.renderActionBar();
 	}
 
 	/**
@@ -560,11 +601,19 @@ class Leap implements IEditorContribution {
 	 * @param error
 	 * @returns
 	 */
-	private renderError(index: number, error: ErrorMessage) {
-		if (!this._codeSection) {
-			console.error('renderError called with no panel or section! Index: ', index);
+	private renderError() {
+		if (!this.codeSection) {
+			console.error('renderError called with no panel or section!');
 			return;
 		}
+		if (!this.completions || this.completions.length <= 0 || !(this.completions[0] instanceof ErrorMessage)) {
+			console.error('renderError called with no completion errors!');
+			return;
+		}
+
+		this.clearElement(this.codeSection);
+
+		const error = this.completions[0] as ErrorMessage;
 
 		const block = document.createElement('div');
 		const md = new MarkdownString();
@@ -586,7 +635,7 @@ class Leap implements IEditorContribution {
 
 		block.appendChild(codeWrapper);
 
-		this._codeSection.appendChild(block);
+		this.codeSection.appendChild(block);
 	}
 
 	/**
@@ -596,69 +645,43 @@ class Leap implements IEditorContribution {
 	 * @param code
 	 * @returns
 	 */
-	private renderPython(index: number) {
-		if (!this._codeSection) {
-			console.error('renderPython called with no panel! Index: ', index);
+	private renderPython() {
+		if (!this.codeSection) {
+			console.error('renderPython called with no panel! ');
 			return;
 		}
 
-		if (!this._lastCompletions || this._lastCompletions.length <= index) {
-			console.error('renderPython called with invalid index. Ignoring: ', index);
+		if (!this.completions || this.completions.length <= 0) {
+			console.error('renderPython called with no completions');
 			return;
 		}
 
-		const completion = this._lastCompletions[index];
+		const completion = this.completions[0];
 		if (!(completion instanceof PythonCode)) {
-			console.error(`showTestcases called with index ${index}, but entry is an error:\n${completion.message}`);
+			console.error('renderPython not called with pythoncode');
 			return;
 		}
 
-		this.clearElement(this._codeSection);
+		this.clearElement(this.codeSection);
 
 		const block = document.createElement('div');
 		block.style.marginBottom = '20px';
 
 		// First, append the title
-		const title = document.createElement('h1');
-		setInner(title, `Suggestion ${index + 1}`);
+		const title = document.createElement('h2');
+		setInner(title, `Suggested code`);
 		block.appendChild(title);
 
-		// Then the links we use to communicate!
-		// TODO could wrap links in div, good ol web dev standards
-		// might need it anyways, to link up with the actual completion div later created?
-		const previewLink = document.createElement('a');
-		previewLink.textContent = "Copy to Editor";
-		previewLink.className = "monaco-button monaco-text-button";
-		previewLink.style.color = "white";
-		previewLink.style.display = "inline-block";
-		previewLink.style.width = "100px";
-		previewLink.style.backgroundColor = "rgb(14, 99, 156)";
-		previewLink.onclick = (_) => {
-			this.previewCompletion(index);
-			this.compressPanel();
-		};
-		block.appendChild(previewLink);
-
-		const revertLink = document.createElement('a');
-		revertLink.textContent = "Revert";
-		revertLink.className = "monaco-button monaco-text-button";
-		revertLink.style.marginLeft = "12px";
-		revertLink.style.display = "inline";
-		revertLink.onclick = (_) => {
-			this.removeCompletion(false);
-		};
-		block.appendChild(revertLink);
-
-		let completionCode = completion.code;
+		// Render the code suggestion
+		// if we have line comments, display that instead
+		let completionCode = this.lineComments && this.viewingLineComments ? this.lineComments : completion.code;
 		// Prepend whitespace if necessary
 		if (this._lastCursorPos?.column) {
 			completionCode = ' '.repeat(this._lastCursorPos.column - 1) + completionCode;
 		}
-
-		// add the code block itself
+		// Add the code block itself
 		const md = new MarkdownString();
-		md.appendCodeblock("python", completionCode);
-
+		md.appendCodeblock(this.getCurrentLanguage() ?? "", completionCode);
 		// Style it!
 		const theme = this._themeService.getColorTheme();
 		const codeWrapper = document.createElement('div');
@@ -672,267 +695,456 @@ class Leap implements IEditorContribution {
 		codeWrapper.appendChild(this._mdRenderer.render(md).element);
 		block.appendChild(codeWrapper);
 
-		// add all the actions that we can do with the code completion
-		// wrap it with a div
-		const actionButtonsDiv = document.createElement("div");
+		const actionButtonsDiv = document.createElement('div');
+		actionButtonsDiv.style.display = 'flex';
+		actionButtonsDiv.style.flexDirection = 'row';
+		actionButtonsDiv.style.justifyContent = 'flex-start';
+		actionButtonsDiv.style.marginTop = '10px';
+		actionButtonsDiv.style.marginBottom = '10px';
+		actionButtonsDiv.style.gap = '12px';
 		block.appendChild(actionButtonsDiv);
 
+		const previewLink = document.createElement('a');
+		previewLink.textContent = "Copy to Editor";
+		previewLink.style.display = "block";
+		previewLink.style.color = "white";
+		previewLink.style.padding = "4px 10px";
+		previewLink.style.backgroundColor = "rgb(14, 99, 156)";
+		previewLink.onclick = (_) => {
+			this.previewCompletion();
+			this.compressPanel();
+		};
+		actionButtonsDiv.appendChild(previewLink);
+
+		const revertLink = document.createElement('a');
+		revertLink.textContent = "Revert";
+		revertLink.style.display = "block";
+		revertLink.style.padding = "4px 10px";
+		revertLink.onclick = (_) => {
+			this.removeCompletion(false);
+		};
+		actionButtonsDiv.appendChild(revertLink);
+
+		if (!this.lineComments) {
+			// allow user to create them
+			const explainLineLink = document.createElement('a');
+			explainLineLink.textContent = "Add Line-by-Line Comments";
+			explainLineLink.style.display = "block";
+			explainLineLink.style.color = "white";
+			explainLineLink.style.marginLeft = "auto";
+			explainLineLink.style.padding = "4px 10px";
+			explainLineLink.style.backgroundColor = "rgb(14, 99, 156)";
+			explainLineLink.onclick = (_) => {
+				this.viewingLineComments = true;
+				this.showLineComments();
+			};
+			actionButtonsDiv.appendChild(explainLineLink);
+		} else {
+			// allow toggling between the two
+			const toggleLineCommentsLink = document.createElement('a');
+			toggleLineCommentsLink.textContent = this.viewingLineComments ? "Hide Comments" : "Show Comments";
+			toggleLineCommentsLink.style.display = "block";
+			toggleLineCommentsLink.style.color = "white";
+			toggleLineCommentsLink.style.marginLeft = "auto";
+			toggleLineCommentsLink.style.padding = "4px 10px";
+			toggleLineCommentsLink.style.backgroundColor = "rgb(14, 99, 156)";
+			toggleLineCommentsLink.onclick = (_) => {
+				this.viewingLineComments = !this.viewingLineComments;
+				this.renderPython();
+			};
+			actionButtonsDiv.appendChild(toggleLineCommentsLink);
+		}
+
+		this.codeSection.appendChild(block);
+	}
+
+	private renderActionBar() {
+		if (!this.panel) {
+			console.error('renderActionBar called with no panel!');
+			return;
+		}
+		this.actionBar = document.createElement("div");
+		this.actionBar.style.marginTop = "40px";
+		this.actionBar.style.marginBottom = "10px";
+
+		const quickStuff = document.createElement("div");
+		quickStuff.style.display = "flex";
+		quickStuff.style.flexDirection = "row";
+		quickStuff.style.justifyContent = "flex-start";
+		quickStuff.style.gap = "12px";
+		this.actionBar.appendChild(quickStuff);
+
 		const explainOverviewLink = document.createElement('a');
-		explainOverviewLink.textContent = "Explain Overview";
-		explainOverviewLink.className = "monaco-button monaco-text-button";
+		explainOverviewLink.textContent = this.highlightingCode ? "Explain Overview" : "Explain Overview";
 		explainOverviewLink.style.color = "white";
-		explainOverviewLink.style.display = "inline-block";
-		explainOverviewLink.style.width = "fit-content";
-		explainOverviewLink.style.marginRight = "12px";
+		explainOverviewLink.style.display = "block";
 		explainOverviewLink.style.padding = "4px 10px";
 		explainOverviewLink.style.backgroundColor = "rgb(14, 99, 156)";
 		explainOverviewLink.onclick = (_) => {
-			this.showExplanation(index, ExplanationLevel.HighLevel);
+			this.showExplanation();
 		};
-		actionButtonsDiv.appendChild(explainOverviewLink);
-
-		const explainLineLink = document.createElement('a');
-		explainLineLink.textContent = "Add Line-by-Line Comments";
-		explainLineLink.className = "monaco-button monaco-text-button";
-		explainLineLink.style.color = "white";
-		explainLineLink.style.display = "inline-block";
-		explainLineLink.style.width = "fit-content";
-		explainLineLink.style.marginRight = "12px";
-		explainLineLink.style.padding = "4px 10px";
-		explainLineLink.style.backgroundColor = "rgb(14, 99, 156)";
-		explainLineLink.onclick = (_) => {
-			this.showExplanation(index, ExplanationLevel.LineByLine);
-		};
-		actionButtonsDiv.appendChild(explainLineLink);
+		quickStuff.appendChild(explainOverviewLink);
 
 		const exampleTestsLink = document.createElement('a');
-		exampleTestsLink.textContent = "Example Tests";
-		exampleTestsLink.className = "monaco-button monaco-text-button";
+		exampleTestsLink.textContent = this.highlightingCode ? "Example Tests" : "Example Tests";
 		exampleTestsLink.style.color = "white";
-		exampleTestsLink.style.display = "inline-block";
-		exampleTestsLink.style.width = "fit-content";
-		exampleTestsLink.style.marginRight = "12px";
+		exampleTestsLink.style.display = "block";
 		exampleTestsLink.style.padding = "4px 10px";
 		exampleTestsLink.style.backgroundColor = "rgb(14, 99, 156)";
 		exampleTestsLink.onclick = (_) => {
-			this.showTestcases(index);
+			this.showTestcases();
 		};
-		actionButtonsDiv.appendChild(exampleTestsLink);
-
-		this._codeSection.appendChild(block);
-	}
+		quickStuff.appendChild(exampleTestsLink);
 
 
-	private async showExplanation(index: number, explanationLevel?: ExplanationLevel) {
-		if (!this._explanationSection) {
-			console.error('explainCompletion called with no section. Ignoring: ', index);
-			return;
-		}
+		const explainMoreLink = document.createElement('a');
+		explainMoreLink.textContent = "Expand Prev Response";
+		explainMoreLink.style.color = "white";
+		explainMoreLink.style.display = "block";
+		explainMoreLink.style.padding = "4px 10px";
+		explainMoreLink.style.backgroundColor = "rgb(14, 99, 156)";
+		explainMoreLink.onclick = (_) => {
+			this.hideConvoResponse(this.convo.length - 1);
+			this.addToConvo("Please provide more details in your previous response.", undefined, undefined, true);
+		};
+		quickStuff.appendChild(explainMoreLink);
 
-		if (!this._lastCompletions || this._lastCompletions.length <= index) {
-			console.error('explainCompletion called with invalid index. Ignoring: ', index);
-			return;
-		}
+		const shortenLink = document.createElement('a');
+		shortenLink.textContent = "Shorten Prev Response";
+		shortenLink.style.color = "white";
+		shortenLink.style.display = "block";
+		shortenLink.style.padding = "4px 10px";
+		shortenLink.style.backgroundColor = "rgb(14, 99, 156)";
+		shortenLink.onclick = (_) => {
+			this.hideConvoResponse(this.convo.length - 1);
+			this.addToConvo("Please shorten your previous response.", undefined, undefined, true);
+		};
+		quickStuff.appendChild(shortenLink);
 
-		const completion = this._lastCompletions[index];
-		if (!(completion instanceof PythonCode)) {
-			console.error(`explainCompletion called with index ${index}, but entry is an error:\n${completion.message}`);
-			return;
-		}
+		const selectedTextMsg = document.createElement("p");
+		selectedTextMsg.textContent = "(Text Selected in Editor will be used)";
+		selectedTextMsg.style.color = "white";
+		selectedTextMsg.style.fontStyle = "italic";
+		selectedTextMsg.style.display = "none";
+		this.actionBar.appendChild(selectedTextMsg);
 
 
-		// if no explanation exists for this index, fetch it
-		// otherwise, use the cached version
-		let explanation: Explanation | undefined = undefined;
-		if (this._lastExplanations && this._lastExplanations[index] && explanationLevel !== ExplanationLevel.LineByLine) {
-			explanation = this._lastExplanations[index];
-		} else {
-			// NOTE added exception for line comments for now
-			if (explanationLevel !== ExplanationLevel.LineByLine) {
-				this.clearElement(this._explanationSection);
+		this._editor.onDidChangeCursorSelection((e) => {
+			if (!e.selection.isEmpty() && this.getHighlightedTextFromEditor()) {
+				this.highlightingCode = true;
+			} else {
+				this.highlightingCode = false;
 			}
-			if (explanationLevel === undefined) {
-				console.error("showExplanation: no explanation level provided!");
+			// explainOverviewLink.textContent = this.highlightingCode ? "Give Overview for Selected" : "Give Overview";
+			// exampleTestsLink.textContent = this.highlightingCode ? "Example Tests for Selected" : "Example Tests";
+			selectedTextMsg.style.display = this.highlightingCode ? "block" : "none";
+		});
+
+		const messagesDiv = document.createElement("div");
+		messagesDiv.style.marginTop = "10px";
+		this.actionBar.appendChild(messagesDiv);
+
+		const messageInput = document.createElement("textarea");
+		messageInput.placeholder = "Ask for more details...";
+		messageInput.style.height = "50px";
+		messageInput.style.padding = "5px";
+		messageInput.style.fontFamily = "inherit";
+		messageInput.style.color = "white";
+		messageInput.style.borderRadius = "4px";
+		messageInput.style.width = "90%";
+		messageInput.style.backgroundColor = "rgb(60, 60, 60)";
+		messagesDiv.appendChild(messageInput);
+
+		const sendMessageButton = document.createElement("a");
+		sendMessageButton.textContent = "Send";
+		sendMessageButton.style.display = "block";
+		sendMessageButton.style.width = "fit-content";
+		sendMessageButton.style.padding = "4px 10px";
+		sendMessageButton.style.backgroundColor = "rgb(14, 99, 156)";
+		sendMessageButton.style.color = "white";
+		sendMessageButton.onclick = async (_) => {
+			if (!messageInput.value.trim()) {
 				return;
 			}
-			// create loading ui stuff
-			const container = document.createElement('div');
-			const loadingTitle = document.createElement('h3');
-			loadingTitle.innerText = 'Getting explanations. Please wait...';
-			const barContainer = document.createElement('div');
-			const progressBar = new ProgressBar(barContainer).total(10);
-			const barElement = progressBar.getContainer();
-			barElement.style.position = 'inherit';
-			(barElement.firstElementChild! as HTMLElement).style.position = 'inherit';
-			container.appendChild(loadingTitle);
-			container.appendChild(barContainer);
-			this._explanationSection.appendChild(container);
 
-			// fetch it using the prompt used and actual code used
-			const codeText = completion.code;
-			explanation = await this._utils.getExplanationsForCode(
-				codeText,
-				this._lastPrompt ?? "",
-				explanationLevel,
-				this._abort.signal,
-				(_e) => progressBar.worked(1)
-			);
-
-			// done loading, clear loading ui
-			progressBar.dispose();
-			container.remove();
-
-			// store explanation for later use
-			// yea treating line-by-line explanations differently, ask vincent
-			if (explanationLevel === ExplanationLevel.HighLevel) {
-				if (!this._lastExplanations) {
-					this._lastExplanations = [];
-				}
-				this._lastExplanations[index] = explanation;
+			const selectedText = this.getHighlightedTextFromEditor();
+			if (selectedText && selectedText.trim() !== "") {
+				await this.addToConvo(messageInput.value.trim(), selectedText);
 			} else {
-				if (this._lastCompletions) {
-					// completely replace the old code with new code but with comments
-					this._lastCompletions[index] = new PythonCode(explanation.explanation);
+				await this.addToConvo(messageInput.value.trim());
+			}
+
+			messageInput.value = "";
+		};
+		messagesDiv.appendChild(sendMessageButton);
+
+		this.panel.appendChild(this.actionBar);
+	}
+
+
+	private async showExplanation() {
+		const selectedText = this.getHighlightedTextFromEditor();
+		if (selectedText && selectedText.trim() !== "") {
+			await this.addToConvo("Provide an explanation of this portion of the code.", selectedText);
+		} else {
+			await this.addToConvo("Provide an explanation of the code.");
+		}
+	}
+
+	private async showLineComments() {
+		if (!this.codeSection) {
+			console.error('showLineComments called with no section');
+			return;
+		}
+
+		if (!this.completions || this.completions.length <= 0) {
+			console.error('showLineComments called with nothing');
+			return;
+		}
+
+		const completion = this.completions[0];
+		if (!(completion instanceof PythonCode)) {
+			console.error(`showLineComments called with entry is an error:\n${completion.message}`);
+			return;
+		}
+
+		if (this.lineComments) {
+			console.error('showLineComments called with line comments already existing');
+			return;
+		}
+
+		// create loading ui stuff
+		const container = document.createElement('div');
+		const loadingTitle = document.createElement('h3');
+		loadingTitle.innerText = 'Getting explanations. Please wait...';
+		const barContainer = document.createElement('div');
+		const progressBar = new ProgressBar(barContainer).total(10);
+		const barElement = progressBar.getContainer();
+		barElement.style.position = 'inherit';
+		(barElement.firstElementChild! as HTMLElement).style.position = 'inherit';
+		container.appendChild(loadingTitle);
+		container.appendChild(barContainer);
+		this.codeSection.appendChild(container);
+
+		this.lineComments = await getLineCommentsExplanation(
+			completion.code,
+			this.codePrompt ?? "",
+			this._abort.signal,
+			(_e) => progressBar.worked(1)
+		);
+
+		// done loading, clear loading ui
+		progressBar.dispose();
+		container.remove();
+		this.renderPython();
+	}
+
+	private async showTestcases() {
+		// TODO
+		const selectedText = this.getHighlightedTextFromEditor();
+		if (selectedText && selectedText.trim() !== "") {
+			await this.addToConvo("Provide example test cases that showcase the selected code's functionality.", selectedText, true);
+		} else {
+			await this.addToConvo("Provide example test cases that showcase the code's functionality.", undefined, true);
+		}
+	}
+
+	private async addToConvo(message: string, codeSnippet?: string, reqTestcases?: boolean, modifyExplainPrefs?: boolean) {
+		if (!this.convo) {
+			this.convo = [];
+		}
+		if (!this.convoSection) {
+			console.error('addToConvo called with no section');
+			return;
+		}
+
+		// first, render user message
+		const userMessageDiv = document.createElement('div');
+		userMessageDiv.style.backgroundColor = "#3a3a3a";
+		userMessageDiv.style.padding = "4px 10px";
+		userMessageDiv.style.maxWidth = "80%";
+		userMessageDiv.style.width = "fit-content";
+		userMessageDiv.style.borderRadius = "4px";
+		userMessageDiv.style.marginLeft = "auto";
+		userMessageDiv.style.marginBottom = '10px';
+		this.convoSection.appendChild(userMessageDiv);
+
+		if (codeSnippet) {
+			const theme = this._themeService.getColorTheme();
+			const codeWrapper = document.createElement('div');
+			codeWrapper.style.padding = '10px';
+			codeWrapper.style.borderRadius = '3px';
+			codeWrapper.style.borderWidth = '1px';
+			codeWrapper.style.borderColor = theme.getColor(editorForeground)?.toString() ?? '';
+			codeWrapper.style.backgroundColor = theme.getColor(editorBackground)?.toString() ?? '';
+			const md = new MarkdownString();
+			md.appendCodeblock(this.getCurrentLanguage(), codeSnippet);
+			codeWrapper.appendChild(this._mdRenderer.render(md).element);
+			userMessageDiv.appendChild(codeWrapper);
+		}
+
+		const userMessage = document.createElement('p');
+		userMessage.textContent = message;
+		userMessage.style.color = 'white';
+		userMessageDiv.appendChild(userMessage);
+
+		// create loading ui
+		const container = document.createElement('div');
+		const loadingTitle = document.createElement('h3');
+		loadingTitle.innerText = 'Loading response...';
+		const barContainer = document.createElement('div');
+		const progressBar = new ProgressBar(barContainer).total(10);
+		const barElement = progressBar.getContainer();
+		barElement.style.position = 'inherit';
+		(barElement.firstElementChild! as HTMLElement).style.position = 'inherit';
+		container.appendChild(loadingTitle);
+		container.appendChild(barContainer);
+		this.convoSection.appendChild(container);
+
+		// make openai call
+		let fullMsg = (codeSnippet ? codeSnippet + "\n\n" : "") + message;
+		if (reqTestcases) {
+			fullMsg += "\n\nProvide the test cases as `assert` statements in separate code blocks.";
+		}
+		if (this.explanationLevelSummary && !modifyExplainPrefs) {
+			fullMsg += `\n\nThe user prefers the following type of responses: ${this.explanationLevelSummary}. When responding, provide the level of detail according to these preferences. Do not say anything unnecessary.`;
+		}
+		const response = await getConvoResponse(
+			fullMsg,
+			this.convo,
+			this._abort.signal,
+			(_e) => progressBar.worked(1)
+		);
+
+		// done loading, clear loading ui
+		progressBar.dispose();
+		container.remove();
+
+		// render the response
+		const responseDiv = document.createElement('div');
+		responseDiv.style.maxWidth = "80%";
+		responseDiv.style.width = "fit-content";
+		responseDiv.style.borderRadius = "4px";
+		responseDiv.style.marginBottom = '10px';
+
+		const hiddenMsg = document.createElement("p");
+		hiddenMsg.style.backgroundColor = "rgb(58 58 58)";
+		hiddenMsg.textContent = "Response hidden.";
+		hiddenMsg.style.fontStyle = "italic";
+		hiddenMsg.style.padding = "4px 10px";
+		hiddenMsg.style.display = "none";
+		responseDiv.appendChild(hiddenMsg);
+
+		const responseContentDiv = document.createElement("div");
+		responseContentDiv.style.padding = "4px 10px";
+		responseContentDiv.style.backgroundColor = "rgb(58 58 58)";
+		responseDiv.appendChild(responseContentDiv);
+
+		if (!response) {
+			const md = new MarkdownString();
+			md.appendMarkdown('> **ERROR!**\n>\n');
+			md.appendMarkdown(`Error getting response, check console for more details.\n>\n`);
+
+			const codeWrapper = document.createElement('div');
+			codeWrapper.appendChild(this._mdRenderer.render(md).element);
+			responseContentDiv.appendChild(codeWrapper);
+		} else {
+			// use markdown to render response
+			const md = new MarkdownString();
+			md.appendMarkdown(response);
+			responseContentDiv.appendChild(this._mdRenderer.render(md).element);
+		}
+
+		this.convoSection.appendChild(responseDiv);
+
+
+		this.convo.push({
+			role: 'user',
+			content: message
+		});
+		this.convo.push({
+			role: 'assistant',
+			content: response ?? ""
+		});
+
+
+		const responseElemId = this.convo.length - 1;
+		this.convoElements[responseElemId] = responseDiv;
+		this.visibleConvoElements[responseElemId] = true;
+
+		const quickStuff = document.createElement("div");
+		quickStuff.style.display = "flex";
+		quickStuff.style.flexDirection = "row";
+		quickStuff.style.justifyContent = "flex-start";
+		quickStuff.style.gap = "5px";
+		responseDiv.appendChild(quickStuff);
+
+		const hideLink = document.createElement('a');
+		hideLink.textContent = "Hide";
+		hideLink.style.display = "block";
+		hideLink.onclick = (_) => {
+			this.hideConvoResponse(responseElemId);
+		};
+		quickStuff.appendChild(hideLink);
+	}
+
+	private hideConvoResponse(idx: number) {
+		if (this.convoElements[idx]) {
+			this.visibleConvoElements[idx] = !this.visibleConvoElements[idx];
+			// get first child of the element and hide it
+			const hideMsg = this.convoElements[idx].firstElementChild;
+			if (hideMsg) {
+				(hideMsg as HTMLElement).style.display = this.visibleConvoElements[idx] ? "none" : "block";
+			}
+			// get second child of element and show it
+			const content = this.convoElements[idx].children[1];
+			if (content) {
+				(content as HTMLElement).style.display = this.visibleConvoElements[idx] ? "block" : "none";
+			}
+			const quickStuff = this.convoElements[idx].children[2];
+			if (quickStuff) {
+				const hideLink = quickStuff.firstElementChild;
+				if (hideLink) {
+					hideLink.textContent = this.visibleConvoElements[idx] ? "Hide" : "Show";
 				}
 			}
 		}
-
-		// render the explanation (using markdown)
-		const block = document.createElement('div');
-
-		const title = document.createElement('h2');
-		if (explanation.level === ExplanationLevel.HighLevel) {
-			this.clearElement(this._explanationSection);
-			title.textContent = "High Level Explanation";
-			block.appendChild(title);
-			const md = new MarkdownString();
-			md.appendMarkdown(explanation.explanation);
-			block.append(this._mdRenderer.render(md).element);
-		} else if (explanation.level === ExplanationLevel.LineByLine) {
-			// (vincent) mind sorcerey im too lazy to explain for now lmao
-			this.renderPython(index);
-		}
-
-
-
-		this._explanationSection.appendChild(block);
 	}
 
-	private async showTestcases(index: number) {
-		if (!this._testcasesSection) {
-			console.error('showTestcases called with no section. Ignoring: ', index);
-			return;
+
+	private getCurrentLanguage(): string {
+		if (!this._editor) {
+			console.error("getCurrentLanguage called with no editor");
+			return "";
 		}
-
-		if (!this._lastCompletions || this._lastCompletions.length <= index) {
-			console.error('showTestcases called with invalid index. Ignoring: ', index);
-			return;
+		const model = this._editor.getModel();
+		if (!model) {
+			console.error("getCurrentLanguage called with no model");
+			return "";
 		}
-
-		const completion = this._lastCompletions[index];
-		if (!(completion instanceof PythonCode)) {
-			console.error(`showTestcases called with index ${index}, but entry is an error:\n${completion.message}`);
-			return;
-		}
-
-		this.clearElement(this._testcasesSection);
-
-		// if no testcases exist for this, fetch it
-		let testcases: string[] = [];
-		if (this._lastTestcases && this._lastTestcases[index]) {
-			testcases = this._lastTestcases[index];
-		} else {
-			// create loading ui stuff
-			const container = document.createElement('div');
-			const loadingTitle = document.createElement('h3');
-			loadingTitle.innerText = 'Getting tests. Please wait...';
-			const barContainer = document.createElement('div');
-			const progressBar = new ProgressBar(barContainer).total(10);
-			const barElement = progressBar.getContainer();
-			barElement.style.position = 'inherit';
-			(barElement.firstElementChild! as HTMLElement).style.position = 'inherit';
-			container.appendChild(loadingTitle);
-			container.appendChild(barContainer);
-			this._testcasesSection.appendChild(container);
-
-			// fetch it using the prompt used and actual code used
-			const codeText = completion.code;
-			testcases = await this._utils.getTestCasesForCode(
-				codeText,
-				this._lastPrompt ?? "",
-				this._abort.signal,
-				(_e) => progressBar.worked(1)
-			);
-
-			// done loading, clear loading ui
-			progressBar.dispose();
-			container.remove();
-			// cache it
-			if (!this._lastTestcases) {
-				this._lastTestcases = [];
-			}
-			this._lastTestcases[index] = testcases;
-		}
-
-		// render the stuff
-		// could render each invidiual testcase separately
-		// for now, treat as whole block
-		const block = document.createElement('div');
-
-		const title = document.createElement('h2');
-		title.textContent = "Example Tests";
-		block.appendChild(title);
-
-		const copyLink = document.createElement('a');
-		copyLink.textContent = "Copy";
-		copyLink.className = "monaco-button monaco-text-button";
-		copyLink.style.display = "inline";
-		copyLink.onclick = (_) => {
-			// for now, copy as a whole
-			clipboard.writeText(testcases.join("\n"));
-			this.removeCompletion(false);
-		};
-		block.appendChild(copyLink);
-
-		// for now, just render as whole
-		const md = new MarkdownString();
-		md.appendCodeblock("python", testcases.join("\n"));
-
-		const theme = this._themeService.getColorTheme();
-		const codeWrapper = document.createElement('div');
-		codeWrapper.style.padding = '10px';
-		codeWrapper.style.borderRadius = '3px';
-		codeWrapper.style.borderWidth = '1px';
-		codeWrapper.style.borderColor = theme.getColor(editorForeground)?.toString() ?? '';
-		codeWrapper.style.backgroundColor = theme.getColor(editorBackground)?.toString() ?? '';
-		codeWrapper.style.marginTop = "5px";
-		codeWrapper.style.marginBottom = "10px";
-		codeWrapper.appendChild(this._mdRenderer.render(md).element);
-		block.appendChild(codeWrapper);
-
-		this._testcasesSection.appendChild(block);
+		const languageId = model.getLanguageId();
+		return languageId;
 	}
 
-	private previewCompletion(index: number) {
-		// TODO (kas) error handling.
-		if (!this._lastCompletions ||
-			this._lastCompletions.length <= index) {
-			console.error('previewCompletion called with invalid index. Ignoring: ', index);
+	private previewCompletion() {
+		if (!this.completions || !this.completions[0]) {
+			console.error('previewCompletion called with no completion');
 			return;
 		}
 
-		const completion = this._lastCompletions[index];
+		const completion = this.completions[0];
 		if (!(completion instanceof PythonCode)) {
-			console.error(`previewCompletion called with index ${index}, but entry is an error:\n${completion.message}`);
+			console.error(`previewCompletion entry is an error:\n${completion.message}`);
 			return;
 		}
 
-		this._logger.preview(index, completion.code);
+		// this._logger.preview(index, completion.code);
 
 		// TODO (kas) for now, we're assuming that we are indenting with spaces.
+		const codeToUse = this.viewingLineComments && this.lineComments ? this.lineComments : completion.code;
 		const code =
 			Leap.completionComment + '\n' +
-			' '.repeat(this._lastCursorPos!.column - 1) + completion.code + '\n' +
+			' '.repeat(this._lastCursorPos!.column - 1) + codeToUse + '\n' +
 			' '.repeat(this._lastCursorPos!.column - 1) + Leap.completionComment;
 
 		// Get the model for the buffer content
@@ -974,12 +1186,13 @@ class Leap implements IEditorContribution {
 			[{ range: range, text: code }]);
 		this._editor.focus();
 		this._editor.setPosition(new Position(start.lineNumber + 1, start.column));
+		this.decorateSuggestion();
 	}
 
 
 	private removeCompletion(commentOnly: boolean = true): void {
 		// TODO (lisa) error handling.
-		if (!this._lastCompletions) {
+		if (!this.completions) {
 			return;
 		}
 
@@ -1231,6 +1444,29 @@ class LeapEscapeAction extends EditorAction {
 	}
 }
 
+// write an EditorAction that uses Escape as the primary key
+class LeapExplainAction extends EditorAction {
+	constructor() {
+		super({
+			id: 'leap.explain',
+			label: 'Escape Leap',
+			alias: 'Escape Leap',
+			precondition: undefined,
+			kbOpts: {
+				kbExpr: null,
+				primary: KeyMod.Shift | KeyMod.Alt | KeyMod.CtrlCmd | KeyCode.KeyE,
+				weight: KeybindingWeight.EditorContrib
+			}
+		});
+	}
+
+	public async run(accessor: ServicesAccessor, editor: ICodeEditor, args: any): Promise<void> {
+		const leap = Leap.get(editor);
+		leap.getHighlightedTextFromEditor();
+	}
+}
+
+
 class LeapDecorAction extends EditorAction {
 	constructor() {
 		super({
@@ -1285,6 +1521,8 @@ registerEditorAction(LeapAction);
 
 // Register the Leap Escape keybinding
 registerEditorAction(LeapEscapeAction);
+
+registerEditorAction(LeapExplainAction);
 
 // Register the Leap keybinding for updating suggestion decoration
 registerEditorAction(LeapDecorAction);

@@ -33,8 +33,6 @@ export { StudyGroup } from "../../rtv/browser/RTVInterfaces";
 export interface ILeapUtils {
 	readonly EOL: string;
 	getCompletions(request: OpenAIRequest, signal: AbortSignal, progressCallback: (e: any) => void): Promise<string[]>;
-	getExplanationsForCode(code: string, origPrompt: string, explanationLevel: ExplanationLevel, signal: AbortSignal, progressCallback: (e: any) => void): Promise<Explanation>;
-	getTestCasesForCode(code: string, origPrompt: string, signal: AbortSignal, progressCallback: (e: any) => void): Promise<string[]>;
 	buildRequest(prefix: string, suffix: string): Promise<OpenAIRequest>;
 	getConfig(): Promise<LeapConfig>;
 	getLogger(editor: ICodeEditor): ILeapLogger;
@@ -43,8 +41,6 @@ export interface ILeapUtils {
 export abstract class ALeapUtils implements ILeapUtils {
 	abstract EOL: string;
 	abstract getCompletions(request: OpenAIRequest, signal: AbortSignal, progressCallback: (e: any) => void): Promise<string[]>;
-	abstract getExplanationsForCode(code: string, origPrompt: string, explanationLevel: ExplanationLevel, signal: AbortSignal, progressCallback: (e: any) => void): Promise<Explanation>;
-	abstract getTestCasesForCode(code: string, origPrompt: string, signal: AbortSignal, progressCallback: (e: any) => void): Promise<string[]>;
 	abstract buildRequest(prefix: string, suffix: string): Promise<OpenAIRequest>;
 	abstract getConfig(): Promise<LeapConfig>;
 	abstract getLogger(editor: ICodeEditor): ILeapLogger;
@@ -193,16 +189,6 @@ export class ErrorMessage {
 	constructor(public readonly message: string) { }
 }
 export type Completion = PythonCode | ErrorMessage;
-
-export enum ExplanationLevel {
-	LineByLine,
-	HighLevel
-}
-
-export type Explanation = {
-	level: ExplanationLevel;
-	explanation: string;
-};
 
 export interface ILeapLogger {
 	modelRequest(request: OpenAIRequest): Promise<void>;
